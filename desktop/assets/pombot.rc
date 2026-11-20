@@ -1,0 +1,4 @@
+// @author wzxgqtl 2026-11-20
+// 资源脚本：把清单作为 RT_MANIFEST(24) 资源嵌入。
+// rc.exe 不能直接吃 .manifest，必须由 .rc 引用一次。
+1 24 "assets/pombot.manifest"

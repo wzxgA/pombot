@@ -1,0 +1,45 @@
+[package]
+name = "pombot"
+version = "0.1.0"
+edition = "2024"
+description = "PomBot —— 私人 AI 助手，手机遥控，电脑执行"
+license = "MIT"
+
+[dependencies]
+global-hotkey = "0.10.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+tray-icon = "0.26.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_System_WinRT",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage",
+    "Storage_Streams",
+    "Foundation",
+    "Globalization",
+] }
+# 必须与 windows 0.62 内部使用的 windows-future 保持同一大版本，
+# 否则 IAsyncOperation 会变成两个不兼容的类型。std 特性用于启用阻塞式 get()。
+windows-future = { version = "0.3.2", features = ["std"] }
+
+# 体积优先：本项目以"单二进制、启动快、常驻内存低"为核心指标，
+# 因此关闭跨 crate 的泛型代码复用（codegen-units=1）并做全量 LTO。
+# @author wzxgqtl 2026-11-20
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[build-dependencies]
+embed-resource = "3.0.12"
