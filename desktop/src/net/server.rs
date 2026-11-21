@@ -119,10 +119,10 @@ async fn pairing_qr(
         .append_pair("pubkey", &view.public_key);
     let code = QrCode::new(url.as_str()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let svg = code
-        .render()
+        .render::<qrcode::render::svg::Color>()
         .min_dimensions(320, 320)
-        .dark_color("#23362f")
-        .light_color("#fffdf8")
+        .dark_color(qrcode::render::svg::Color("#23362f"))
+        .light_color(qrcode::render::svg::Color("#fffdf8"))
         .build();
     Ok(([(header::CONTENT_TYPE, "image/svg+xml")], svg))
 }

@@ -48,6 +48,13 @@ async fn phone_pairs_authenticates_and_receives_streamed_answer() {
         .await
         .expect("解析配对状态");
     let code = status["code"].as_str().expect("配对码").to_owned();
+    let qr = reqwest::get(format!("http://127.0.0.1:{port}/pairing/qr.svg"))
+        .await
+        .expect("读取配对二维码")
+        .text()
+        .await
+        .expect("解析二维码 SVG");
+    assert!(qr.starts_with("<?xml") && qr.contains("<svg") && qr.ends_with("</svg>"));
     let device_id = Uuid::new_v4().to_string();
     let pair_url = format!("ws://127.0.0.1:{port}/ws/pair");
     let (mut pairing, _) = connect_async(pair_url).await.expect("连接配对服务");
