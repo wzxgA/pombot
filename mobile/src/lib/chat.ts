@@ -16,6 +16,12 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   createdAt: number;
+  /**
+   * 仍在流式接收中。
+   * 渲染层据此决定用纯文本还是 Markdown：边收边解析会让每帧都重排，
+   * 长输出时肉眼可见地卡；等 chat.done 之后一次性渲染更稳。
+   */
+  streaming?: boolean;
 }
 
 interface ChatCallbacks {
@@ -87,6 +93,7 @@ export class ChatStore {
             role: 'assistant',
             content: delta.delta,
             createdAt: envelope.ts,
+            streaming: true,
           });
         this.callbacks.onMessages([...this.messages]);
         break;
@@ -94,13 +101,17 @@ export class ChatStore {
       case 'chat.done': {
         const done = envelope.payload as unknown as ChatDone;
         const existing = this.messages.find((message) => message.id === done.message_id);
-        if (existing) existing.content = done.content;
-        else
+        if (existing) {
+          existing.content = done.content;
+          // 收完才切到 Markdown 渲染。
+          existing.streaming = false;
+        } else
           this.messages.push({
             id: done.message_id,
             role: 'assistant',
             content: done.content,
             createdAt: envelope.ts,
+            streaming: false,
           });
         this.callbacks.onMessages([...this.messages]);
         this.callbacks.onSending(false);

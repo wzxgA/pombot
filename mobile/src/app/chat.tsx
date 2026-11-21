@@ -14,6 +14,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import Markdown from '@ronradtke/react-native-markdown-display';
+
 import { Pom } from '../components/Pom';
 import { ChatStore, type ChatMessage, type ConnectionStatus } from '../lib/chat';
 import { getServerConnection, resetServerConnection } from '../lib/connection';
@@ -114,7 +116,15 @@ export default function ChatScreen() {
           ListEmptyComponent={<View style={styles.welcome}><Pom offline={!connected} size={136} /><Text style={styles.hello}>今天想做点什么？</Text><Text style={styles.hint}>说一句话，Pom 会通过电脑上的模型回答你。</Text></View>}
           renderItem={({ item }) => (
             <View style={[styles.bubble, item.role === 'user' ? styles.userBubble : styles.assistantBubble]}>
-              <Text style={item.role === 'user' ? styles.userText : styles.assistantText}>{item.content || '…'}</Text>
+              {item.role === 'user' || item.streaming ? (
+                // 用户输入按原样显示，避免手动打的符号被 Markdown 语法吞掉；
+                // 流式阶段同样走纯文本，收完再一次性解析，避免每帧重排。
+                <Text style={item.role === 'user' ? styles.userText : styles.assistantText}>
+                  {item.content || '…'}
+                </Text>
+              ) : (
+                <Markdown style={markdownStyles}>{item.content || '…'}</Markdown>
+              )}
             </View>
           )}
         />
@@ -137,6 +147,60 @@ export default function ChatScreen() {
     </SafeAreaView>
   );
 }
+
+// 助手回复按 Markdown 渲染。配色沿用纸感米白 + 深橄榄绿，
+// 代码块用浅底等宽字体，保证长段输出仍然可读。
+// @author wzxgqtl 2026-11-21
+const markdownStyles = {
+  body: { color: '#23362f', fontSize: 16, lineHeight: 24 },
+  paragraph: { marginTop: 0, marginBottom: 8 },
+  heading1: { color: '#23362f', fontSize: 20, fontWeight: '800' as const, marginTop: 8, marginBottom: 6 },
+  heading2: { color: '#23362f', fontSize: 18, fontWeight: '800' as const, marginTop: 8, marginBottom: 6 },
+  heading3: { color: '#23362f', fontSize: 17, fontWeight: '700' as const, marginTop: 6, marginBottom: 4 },
+  strong: { fontWeight: '700' as const },
+  em: { fontStyle: 'italic' as const },
+  link: { color: '#3d6b57', textDecorationLine: 'underline' as const },
+  blockquote: {
+    backgroundColor: '#f0ece1',
+    borderLeftColor: '#547665',
+    borderLeftWidth: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginVertical: 6,
+  },
+  code_inline: {
+    backgroundColor: '#f0ece1',
+    color: '#7a4a3c',
+    fontFamily: 'monospace',
+    fontSize: 14,
+    paddingHorizontal: 4,
+    borderRadius: 4,
+  },
+  code_block: {
+    backgroundColor: '#f0ece1',
+    color: '#33413a',
+    fontFamily: 'monospace',
+    fontSize: 13,
+    lineHeight: 20,
+    padding: 10,
+    borderRadius: 10,
+    marginVertical: 6,
+  },
+  fence: {
+    backgroundColor: '#f0ece1',
+    color: '#33413a',
+    fontFamily: 'monospace',
+    fontSize: 13,
+    lineHeight: 20,
+    padding: 10,
+    borderRadius: 10,
+    marginVertical: 6,
+  },
+  bullet_list: { marginVertical: 4 },
+  ordered_list: { marginVertical: 4 },
+  list_item: { marginVertical: 2 },
+  hr: { backgroundColor: '#e0dbcf', height: 1, marginVertical: 10 },
+};
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#f5f1e8' },
