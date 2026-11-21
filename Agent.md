@@ -2,7 +2,10 @@
 
 本文件是给 AI 编码助手与人类贡献者的工程约定。**动手写代码前先读完本文。**
 
-设计与阶段规划见 `plans/plan.md` 与 `plans/tasks.md`（这两个文件不进版本库），本文只讲"怎么写"。
+设计与阶段规划见 `plans/plan.md` 与 `plans/tasks.md`，技术决策记录见 `docs/decisions/`。
+这三处均为本地过程文档，已被 `.gitignore` 排除，**不会出现在仓库里**——阅读本文件的人只需按本文执行，不必寻找这些路径。
+
+本文只讲"怎么写"。
 
 ---
 
@@ -108,7 +111,7 @@ fn to_absolute(x: i32, y: i32) -> (i32, i32) { ... }
 | **Tauri** | 会拉入 WebView2 与大量依赖，体积从 15MB 涨到 30MB+，抵消 Rust 优势 |
 | **Python / Node 子进程** | 单进程架构已经确定，多运行时等于白选 Rust |
 | **UI Automation 控件树** | 本项目采用纯视觉路线，只允许截图、OCR、窗口级 OS 信息 |
-| **任何托管云服务** | 单用户自托管，不依赖服务的账号、存储、推送 |
+| **任何运行时托管云服务** | 单用户自托管，运行时不依赖服务的账号、存储、推送；EAS 仅用于开发期构建与签名 |
 | **多租户 / 账号 / 密码体系** | 只做设备配对，登录与多用户明确不在范围内 |
 | **PaddleOCR 全量框架** | 体积数百 MB，若需精读 OCR 改用 `ort` + 自写后处理 |
 | **给形象资源套用代码的 MIT 许可** | `assets/` 下的绒球形象、Logo、图标**保留所有权利**，不随代码授权；新增素材需单独确认许可 |
@@ -145,7 +148,7 @@ fn to_absolute(x: i32, y: i32) -> (i32, i32) { ... }
 pombot/
 ├── desktop/              # Rust（Cargo workspace 根）
 │   ├── src/
-│   │   ├── main.rs       # 入口：托盘 + 服务启动
+│   │   ├── bin/pombotd.rs # 入口：托盘 + 服务启动
 │   │   ├── core/         # LLM / Agent Loop / Registry / Job / 同步
 │   │   ├── gui/          # capture / input / ocr / window
 │   │   ├── store/        # rusqlite schema / 迁移 / seq
@@ -192,8 +195,8 @@ strip = "symbols"
 ```bash
 cd mobile
 pnpm install
-npx expo start          # 开发
-npx eas build -p android --profile preview   # 出 APK
+npx expo run:android                              # 本地开发包，需要 Android SDK
+npx eas-cli@latest build -p android --profile preview # EAS 云构建 APK
 ```
 
 ### 契约生成
