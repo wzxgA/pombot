@@ -138,8 +138,9 @@ async fn health() -> Json<Value> {
 async fn pairing_status(
     State(state): State<AppState>,
     axum::extract::ConnectInfo(address): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
-    require_local(address)?;
+    require_local(address, &headers)?;
     Ok(Json(
         serde_json::to_value(state.pairing.view()).unwrap_or_else(|_| json!({})),
     ))
@@ -148,8 +149,9 @@ async fn pairing_status(
 async fn pairing_qr(
     State(state): State<AppState>,
     axum::extract::ConnectInfo(address): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    require_local(address)?;
+    require_local(address, &headers)?;
     let view = state.pairing.view();
     let mut url = Url::parse("pombot://pair").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     url.query_pairs_mut()
@@ -168,8 +170,9 @@ async fn pairing_qr(
 
 async fn pairing_page(
     axum::extract::ConnectInfo(address): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Html<&'static str>, StatusCode> {
-    require_local(address)?;
+    require_local(address, &headers)?;
     Ok(Html(PAIRING_PAGE))
 }
 
@@ -274,12 +277,29 @@ fn parse_range(value: &str, total: usize) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-fn require_local(address: std::net::SocketAddr) -> Result<(), StatusCode> {
-    if address.ip().is_loopback() {
+/// 只允许本机访问配对相关端点。
+///
+/// 仅看源地址是不够的：经反向代理（Cloudflare Tunnel 等）转发进来时，
+/// 源地址同样是 127.0.0.1，`is_loopback()` 会放行公网请求。
+/// 代理一定会带上转发头，因此这里同时要求"没有转发头"。
+fn require_local(address: std::net::SocketAddr, headers: &HeaderMap) -> Result<(), StatusCode> {
+    if address.ip().is_loopback() && !is_proxied(headers) {
         Ok(())
     } else {
         Err(StatusCode::NOT_FOUND)
     }
+}
+
+/// 判断请求是否经过反向代理转发。
+fn is_proxied(headers: &HeaderMap) -> bool {
+    [
+        "cf-connecting-ip",
+        "x-forwarded-for",
+        "x-real-ip",
+        "cdn-loop",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name))
 }
 
 async fn pair_upgrade(
@@ -1048,3 +1068,33 @@ if(s.paired_device){var box=document.getElementById('paired');box.hidden=false;b
 if(changed||s.expires_in<2){document.querySelector('img').src='/pairing/qr.svg?t='+Date.now();}}catch(e){}}
 refresh();setInterval(refresh,2000);
 </script></body></html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn loopback_without_forwarding_headers_is_local() {
+        let address: std::net::SocketAddr = "127.0.0.1:5000".parse().expect("地址");
+        assert!(require_local(address, &HeaderMap::new()).is_ok());
+    }
+
+    #[test]
+    fn tunnel_traffic_is_rejected_despite_loopback_source() {
+        // 经隧道转发时源地址就是 127.0.0.1，只能靠转发头区分。
+        let address: std::net::SocketAddr = "127.0.0.1:5000".parse().expect("地址");
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("8.8.8.8"));
+        assert!(require_local(address, &headers).is_err());
+    }
+
+    #[test]
+    fn any_common_forwarding_header_counts_as_proxied() {
+        for name in ["x-forwarded-for", "x-real-ip", "cdn-loop"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, HeaderValue::from_static("1"));
+            assert!(is_proxied(&headers), "{name} 应被识别为转发请求");
+        }
+    }
+}
