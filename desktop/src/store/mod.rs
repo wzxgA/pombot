@@ -48,8 +48,9 @@ impl Store {
         Self::initialize(connection)
     }
 
+    /// 仅测试使用。跨模块的单元测试也需要它，因此放宽到 crate 可见。
     #[cfg(test)]
-    fn in_memory() -> Result<Self> {
+    pub(crate) fn in_memory() -> Result<Self> {
         Self::initialize(Connection::open_in_memory()?)
     }
 

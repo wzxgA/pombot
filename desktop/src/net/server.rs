@@ -25,6 +25,9 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tracing::{info, warn};
 use url::Url;
 
+/// 一次对话最多允许几轮工具调用。超过就停下来，避免模型反复调工具烧 token。
+const MAX_TOOL_ROUNDS: usize = 4;
+
 use crate::{
     config::{AppConfig, AppPaths},
     contract::{
@@ -32,7 +35,7 @@ use crate::{
         LockChanged, LockRequest, LockState, ObjectOpKind, PairChallenge, PairConfirm, PairResult,
         PairStart, SyncChanges, SyncPull, SyncPush, SyncPushResult, Type,
     },
-    core::llm::LlmClient,
+    core::llm::{LlmClient, RequestMessage},
     net::{
         discovery,
         pairing::{PairingManager, hash_token},
@@ -47,6 +50,8 @@ struct AppState {
     store: Arc<Store>,
     pairing: Arc<PairingManager>,
     local_url: String,
+    /// 工具产出文件与产物实体都落在这下面。
+    data_dir: std::path::PathBuf,
     /// 当前在线设备 -> 出站通道。锁变更需要广播给所有设备，因此必须集中登记。
     clients: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Envelope>>>>,
 }
@@ -75,6 +80,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
         store,
         pairing,
         local_url: local_url.clone(),
+        data_dir: paths.data_dir.clone(),
         clients: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
@@ -767,7 +773,7 @@ async fn run_chat(
             return;
         }
     };
-    let mut history = match state.store.history(&session_id, 50) {
+    let history = match state.store.history(&session_id, 50) {
         Ok(history) => history,
         Err(error) => {
             let _ = outbound.send(error_envelope(
@@ -777,17 +783,13 @@ async fn run_chat(
             return;
         }
     };
-    let user = match state.store.append_message(&session_id, "user", content) {
-        Ok(message) => message,
-        Err(error) => {
-            let _ = outbound.send(error_envelope(
-                format!("保存消息失败：{error:#}"),
-                Some(request_id),
-            ));
-            return;
-        }
-    };
-    history.push(user);
+    if let Err(error) = state.store.append_message(&session_id, "user", content) {
+        let _ = outbound.send(error_envelope(
+            format!("保存消息失败：{error:#}"),
+            Some(request_id),
+        ));
+        return;
+    }
     let assistant = match state.store.append_message(&session_id, "assistant", "") {
         Ok(message) => message,
         Err(error) => {
@@ -799,32 +801,87 @@ async fn run_chat(
         }
     };
     let message_id = assistant.id.clone();
-    let delta_session = session_id.clone();
-    let delta_message = message_id.clone();
-    let delta_outbound = outbound.clone();
-    let result = client
-        .stream_chat(history, move |delta| {
-            if let Ok(event) = new_envelope(
-                Type::ChatDelta,
-                ChatDelta {
-                    session_id: delta_session.clone(),
-                    message_id: delta_message.clone(),
-                    delta,
+
+    let mut messages = LlmClient::history_messages(history);
+    messages.push(RequestMessage::text("user", content));
+
+    // 多轮循环：模型可能先要求调用工具，拿到结果后再组织最终回答。
+    // 每轮的文本增量都落到同一个气泡里，避免回答中途"消失重来"。
+    let mut accumulated = String::new();
+    let mut rounds = 0_usize;
+    loop {
+        rounds += 1;
+        let delta_session = session_id.clone();
+        let delta_message = message_id.clone();
+        let delta_outbound = outbound.clone();
+        let outcome = match client
+            .stream_chat(
+                messages.clone(),
+                crate::core::tools::specs(),
+                move |delta| {
+                    if let Ok(event) = new_envelope(
+                        Type::ChatDelta,
+                        ChatDelta {
+                            session_id: delta_session.clone(),
+                            message_id: delta_message.clone(),
+                            delta,
+                        },
+                    ) {
+                        let _ = delta_outbound.send(event);
+                    }
                 },
-            ) {
-                let _ = delta_outbound.send(event);
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let message = format!("模型请求失败：{error:#}");
+                let _ = outbound.send(error_envelope(message.clone(), Some(request_id.clone())));
+                accumulated.push_str(&message);
+                break;
             }
-        })
-        .await;
-    let content = match result {
-        Ok(content) => content,
-        Err(error) => {
-            let message = format!("模型请求失败：{error:#}");
-            let _ = outbound.send(error_envelope(message.clone(), Some(request_id.clone())));
-            message
+        };
+
+        accumulated.push_str(&outcome.content);
+
+        if outcome.tool_calls.is_empty() {
+            break;
         }
-    };
-    if let Err(error) = state.store.update_message_content(&message_id, &content) {
+        if rounds > MAX_TOOL_ROUNDS {
+            accumulated.push_str("\n\n（已达到工具调用上限，先停在这里）");
+            break;
+        }
+
+        info!(
+            "模型请求调用工具：{}",
+            outcome
+                .tool_calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        messages.push(RequestMessage::assistant_with_tool_calls(
+            &outcome.tool_calls,
+        ));
+        for call in &outcome.tool_calls {
+            let result = match crate::core::tools::execute(
+                &call.name,
+                &call.arguments,
+                &state.store,
+                &state.data_dir,
+            ) {
+                Ok(text) => text,
+                Err(error) => format!("工具执行失败：{error:#}"),
+            };
+            messages.push(RequestMessage::tool_result(&call.id, result));
+        }
+    }
+
+    if let Err(error) = state
+        .store
+        .update_message_content(&message_id, &accumulated)
+    {
         let _ = outbound.send(error_envelope(
             format!("保存回答失败：{error:#}"),
             Some(request_id),
@@ -836,7 +893,7 @@ async fn run_chat(
         ChatDone {
             session_id,
             message_id,
-            content,
+            content: accumulated,
         },
     ) {
         let _ = outbound.send(event);
