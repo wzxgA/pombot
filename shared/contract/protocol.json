@@ -27,7 +27,9 @@
     "syncPushResult": { "$ref": "#/$defs/SyncPushResultPayload" },
     "lockRequest": { "$ref": "#/$defs/LockRequestPayload" },
     "lockState": { "$ref": "#/$defs/LockStatePayload" },
-    "lockChanged": { "$ref": "#/$defs/LockChangedPayload" }
+    "lockChanged": { "$ref": "#/$defs/LockChangedPayload" },
+    "toolConfirm": { "$ref": "#/$defs/ToolConfirmPayload" },
+    "toolDecision": { "$ref": "#/$defs/ToolDecisionPayload" }
   },
   "$defs": {
     "Envelope": {
@@ -37,7 +39,7 @@
       "properties": {
         "v": { "type": "integer", "const": 1 },
         "id": { "type": "string", "format": "uuid" },
-        "type": { "type": "string", "enum": ["auth", "auth.ok", "pair.start", "pair.challenge", "pair.confirm", "pair.result", "chat.send", "chat.history", "chat.history.result", "chat.delta", "chat.done", "sync.pull", "sync.changes", "sync.push", "sync.push.result", "lock.acquire", "lock.release", "lock.heartbeat", "lock.state", "lock.changed", "ping", "pong", "error"] },
+        "type": { "type": "string", "enum": ["auth", "auth.ok", "pair.start", "pair.challenge", "pair.confirm", "pair.result", "chat.send", "chat.history", "chat.history.result", "chat.delta", "chat.done", "sync.pull", "sync.changes", "sync.push", "sync.push.result", "lock.acquire", "lock.release", "lock.heartbeat", "lock.state", "lock.changed", "tool.confirm", "tool.decision", "ping", "pong", "error"] },
         "ts": { "type": "integer", "minimum": 0 },
         "nonce": { "type": "string", "minLength": 8, "maxLength": 128 },
         "payload": true
@@ -308,6 +310,29 @@
         "object_id": { "type": "string" },
         "holder_device_name": { "type": "string", "description": "空字符串表示锁已释放" },
         "expires_in_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "ToolConfirmPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_id", "tool", "summary", "risk", "expires_in_ms"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "tool": { "type": "string" },
+        "summary": { "type": "string", "description": "给用户看的一句话说明，描述这次操作到底做什么" },
+        "risk": { "type": "string", "enum": ["low", "medium", "high", "blocked"] },
+        "expires_in_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "ToolDecisionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_id", "approve"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "approve": { "type": "boolean" }
       }
     }
   }

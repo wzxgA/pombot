@@ -6,6 +6,7 @@ import {
   Alert,
   FlatList,
   KeyboardAvoidingView,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -17,9 +18,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Markdown from '@ronradtke/react-native-markdown-display';
 
 import { Pom } from '../components/Pom';
+import type { ToolConfirmPayload } from '../generated/contract';
 import { ChatStore, type ChatMessage, type ConnectionStatus } from '../lib/chat';
-import { getServerConnection, resetServerConnection } from '../lib/connection';
+import { getServerConnection, resetServerConnection, type ServerConnection } from '../lib/connection';
 import { clearPairedDevice, loadPairedDevice } from '../lib/identity';
+
+interface PendingConfirm {
+  callId: string;
+  tool: string;
+  summary: string;
+  expiresIn: number;
+}
 
 export default function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -27,12 +36,15 @@ export default function ChatScreen() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
   const store = useRef<ChatStore | null>(null);
+  const connection = useRef<ServerConnection | null>(null);
   const list = useRef<FlatList<ChatMessage>>(null);
 
   useEffect(() => {
     let active = true;
     let unsubscribe = () => {};
+    let unsubscribeConfirm = () => {};
     loadPairedDevice()
       .then((device) => {
         if (!active) return;
@@ -40,22 +52,49 @@ export default function ChatScreen() {
           router.replace('/pair');
           return;
         }
-        const connection = getServerConnection(device);
-        store.current = new ChatStore(connection, {
+        const client = getServerConnection(device);
+        connection.current = client;
+        store.current = new ChatStore(client, {
           onMessages: setMessages,
           onSending: setSending,
           onError: setError,
         });
-        unsubscribe = connection.onStatus(setStatus);
-        connection.connect();
+        // 高风险工具的确认请求会广播到所有设备，聊天页负责把它变成一次交互。
+        unsubscribeConfirm = client.subscribe((envelope) => {
+          if (envelope.type !== 'tool.confirm') return;
+          const payload = envelope.payload as unknown as ToolConfirmPayload;
+          setConfirm({
+            callId: payload.call_id,
+            tool: payload.tool,
+            summary: payload.summary,
+            expiresIn: payload.expires_in_ms,
+          });
+        });
+        unsubscribe = client.onStatus(setStatus);
+        client.connect();
       })
       .catch((reason) => setError(String(reason)));
     return () => {
       active = false;
       unsubscribe();
+      unsubscribeConfirm();
       store.current?.dispose();
     };
   }, []);
+
+  // 超时后自动收起，避免用户面对一个早已失效的确认框。
+  useEffect(() => {
+    if (!confirm) return;
+    const timer = setTimeout(() => setConfirm(null), Math.max(1000, confirm.expiresIn));
+    return () => clearTimeout(timer);
+  }, [confirm]);
+
+  const decide = (approve: boolean) => {
+    if (confirm) {
+      connection.current?.send('tool.decision', { call_id: confirm.callId, approve });
+    }
+    setConfirm(null);
+  };
 
   const send = () => {
     if (!input.trim() || sending) return;
@@ -144,6 +183,31 @@ export default function ChatScreen() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal
+        transparent
+        visible={confirm !== null}
+        animationType="fade"
+        onRequestClose={() => decide(false)}
+      >
+        <View style={styles.backdrop}>
+          <View style={styles.confirmCard}>
+            <Text style={styles.confirmTitle}>Pom 想执行一个操作</Text>
+            <Text style={styles.confirmSummary}>{confirm?.summary}</Text>
+            <Text style={styles.confirmHint}>
+              工具 {confirm?.tool} · {Math.round((confirm?.expiresIn ?? 0) / 1000)} 秒内不回应视为拒绝
+            </Text>
+            <View style={styles.confirmRow}>
+              <Pressable style={[styles.confirmButton, styles.reject]} onPress={() => decide(false)}>
+                <Text style={styles.rejectText}>拒绝</Text>
+              </Pressable>
+              <Pressable style={[styles.confirmButton, styles.approve]} onPress={() => decide(true)}>
+                <Text style={styles.approveText}>允许</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -230,4 +294,21 @@ const styles = StyleSheet.create({
   send: { height: 46, minWidth: 66, borderRadius: 16, backgroundColor: '#547665', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 15 },
   sendDisabled: { opacity: 0.45 },
   sendText: { color: '#fffdf8', fontSize: 15, fontWeight: '700' },
+  backdrop: {
+    flex: 1,
+    backgroundColor: '#23362f66',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  confirmCard: { backgroundColor: '#fffdf8', borderRadius: 22, padding: 22, width: '100%' },
+  confirmTitle: { color: '#23362f', fontSize: 17, fontWeight: '800' },
+  confirmSummary: { color: '#3c4a43', fontSize: 15, lineHeight: 23, marginTop: 12 },
+  confirmHint: { color: '#87918b', fontSize: 12, marginTop: 10 },
+  confirmRow: { flexDirection: 'row', gap: 12, marginTop: 20 },
+  confirmButton: { flex: 1, paddingVertical: 13, borderRadius: 14, alignItems: 'center' },
+  reject: { backgroundColor: '#f0ece1' },
+  rejectText: { color: '#7c5c53', fontWeight: '700' },
+  approve: { backgroundColor: '#547665' },
+  approveText: { color: '#fffdf8', fontWeight: '700' },
 });

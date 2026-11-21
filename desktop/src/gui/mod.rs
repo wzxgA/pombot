@@ -2,6 +2,7 @@
 // GUI 底层能力：截图、键鼠注入、窗口枚举、OCR。
 
 pub mod capture;
+pub mod confirm;
 pub mod input;
 pub mod ocr;
 pub mod window;

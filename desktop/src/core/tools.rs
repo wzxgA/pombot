@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::{core::llm::ToolDef, store::Store};
+use crate::{contract::Risk, core::llm::ToolDef, store::Store};
 
 /// 生成的中间文件目录名。产物实体由 blobs 目录持有，这里只是写盘时的落脚点。
 const GENERATED_DIR: &str = "generated";
@@ -42,6 +42,34 @@ pub fn specs() -> Vec<ToolDef> {
             }),
         },
     }]
+}
+
+/// 工具的风险等级。
+///
+/// 判定标准是四条，满足任意一条就往上升级：
+/// 可撤销性、外部副作用、是否涉及钱财与身份、数据破坏性。
+/// 未注册的工具一律按 Blocked 处理，避免出现"忘了标注就等于放行"。
+pub fn risk_of(name: &str) -> Risk {
+    match name {
+        // 只写本地文件，错了删掉即可，不产生外部影响。
+        "create_text_file" => Risk::Low,
+        _ => Risk::Blocked,
+    }
+}
+
+/// 给用户看的一句话说明。确认弹窗必须能让人判断"它到底要做什么"，
+/// 只显示工具名是没有意义的。
+pub fn summary_of(name: &str, arguments: &str) -> String {
+    match name {
+        "create_text_file" => {
+            let file = serde_json::from_str::<Value>(arguments)
+                .ok()
+                .and_then(|args| args.get("name").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| "未命名文件".to_owned());
+            format!("创建文件「{file}」")
+        }
+        other => format!("调用工具 {other}"),
+    }
 }
 
 /// 执行一次工具调用，返回给模型看的结果文本。
@@ -139,6 +167,21 @@ mod tests {
         assert!(objects[0].artifact.is_some(), "产物元数据应写入对象");
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unregistered_tools_are_blocked_by_default() {
+        // 关键行为：没有显式登记的工具一律不放行，避免"忘了标注就等于允许"。
+        assert_eq!(risk_of("create_text_file"), Risk::Low);
+        assert_eq!(risk_of("run_command"), Risk::Blocked);
+        assert_eq!(risk_of(""), Risk::Blocked);
+    }
+
+    #[test]
+    fn summary_mentions_the_concrete_target() {
+        let arguments = json!({ "name": "周报.md", "content": "x" }).to_string();
+        let summary = summary_of("create_text_file", &arguments);
+        assert!(summary.contains("周报.md"), "实际：{summary}");
     }
 
     #[test]

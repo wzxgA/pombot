@@ -33,7 +33,8 @@ use crate::{
     contract::{
         Auth, AuthOk, ChatDelta, ChatDone, ChatHistory, ChatHistoryResult, ChatSend, Envelope,
         LockChanged, LockRequest, LockState, ObjectOpKind, PairChallenge, PairConfirm, PairResult,
-        PairStart, SyncChanges, SyncPull, SyncPush, SyncPushResult, Type,
+        PairStart, Risk, SyncChanges, SyncPull, SyncPush, SyncPushResult, ToolConfirm,
+        ToolDecision, Type,
     },
     core::llm::{LlmClient, RequestMessage},
     net::{
@@ -54,7 +55,12 @@ struct AppState {
     data_dir: std::path::PathBuf,
     /// 当前在线设备 -> 出站通道。锁变更需要广播给所有设备，因此必须集中登记。
     clients: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Envelope>>>>,
+    /// 等待用户裁决的高风险工具调用。key 是 call_id。
+    pending_confirms: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
+
+/// 高风险操作的确认窗口。超时按拒绝处理，避免无人值守时自动放行。
+const CONFIRM_TIMEOUT_MS: i64 = 60_000;
 
 /// 把一条消息推给所有在线设备。锁的归属变化需要让每一端立刻刷新只读态。
 fn broadcast(state: &AppState, envelope_type: Type, payload: impl serde::Serialize) {
@@ -82,6 +88,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
         local_url: local_url.clone(),
         data_dir: paths.data_dir.clone(),
         clients: Arc::new(Mutex::new(HashMap::new())),
+        pending_confirms: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -685,6 +692,24 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
                     ));
                 }
             },
+            Type::ToolDecision => match protocol::payload::<ToolDecision>(&envelope) {
+                Ok(payload) => {
+                    let sender = state
+                        .pending_confirms
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .remove(&payload.call_id);
+                    if let Some(sender) = sender {
+                        let _ = sender.send(payload.approve);
+                    }
+                }
+                Err(error) => {
+                    let _ = outbound.send(error_envelope(
+                        format!("消息参数错误：{error}"),
+                        Some(request_id),
+                    ));
+                }
+            },
             _ => {
                 let _ = outbound.send(error_envelope("不支持的消息类型", Some(request_id)));
             }
@@ -715,6 +740,76 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
         }
         Err(error) => warn!("释放设备编辑锁失败：{error:#}"),
     }
+}
+
+fn run_tool(state: &AppState, name: &str, arguments: &str) -> String {
+    match crate::core::tools::execute(name, arguments, &state.store, &state.data_dir) {
+        Ok(text) => text,
+        Err(error) => format!("工具执行失败：{error:#}"),
+    }
+}
+
+/// 高风险调用：广播确认请求并等待任一设备裁决。
+///
+/// 没有在线设备时直接拒绝——"无人值守"不能成为自动放行的理由。
+/// 超时同样按拒绝处理，避免流程永久挂起。
+async fn wait_for_approval(state: &AppState, call_id: &str, tool: &str, summary: &str) -> bool {
+    let online = !state
+        .clients
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .is_empty();
+    if !online {
+        warn!("高风险工具 {tool} 无设备在线，直接拒绝");
+        return false;
+    }
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    state
+        .pending_confirms
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(call_id.to_owned(), sender);
+
+    broadcast(
+        state,
+        Type::ToolConfirm,
+        ToolConfirm {
+            call_id: call_id.to_owned(),
+            tool: tool.to_owned(),
+            summary: summary.to_owned(),
+            risk: Risk::High,
+            expires_in_ms: CONFIRM_TIMEOUT_MS,
+        },
+    );
+
+    // 双端裁决：手机点了"允许"或电脑点了"拒绝"，谁先到算谁。
+    // 电脑端窗口未启动时（例如测试环境）退化为只等手机。
+    let pc_receiver = crate::gui::confirm::ask(tool, summary, CONFIRM_TIMEOUT_MS);
+    let mut phone_receiver = receiver;
+    let decided = tokio::time::timeout(
+        Duration::from_millis(CONFIRM_TIMEOUT_MS as u64),
+        async move {
+            match pc_receiver {
+                Some(mut pc) => {
+                    tokio::select! {
+                        result = &mut phone_receiver => matches!(result, Ok(true)),
+                        result = &mut pc => matches!(result, Ok(true)),
+                    }
+                }
+                None => matches!(phone_receiver.await, Ok(true)),
+            }
+        },
+    )
+    .await;
+    let approved = matches!(decided, Ok(true));
+
+    state
+        .pending_confirms
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(call_id);
+    approved
 }
 
 async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<crate::store::Device> {
@@ -865,14 +960,18 @@ async fn run_chat(
             &outcome.tool_calls,
         ));
         for call in &outcome.tool_calls {
-            let result = match crate::core::tools::execute(
-                &call.name,
-                &call.arguments,
-                &state.store,
-                &state.data_dir,
-            ) {
-                Ok(text) => text,
-                Err(error) => format!("工具执行失败：{error:#}"),
+            let result = match crate::core::tools::risk_of(&call.name) {
+                // 被策略禁用的工具必须明确回给模型，否则它会反复重试同一个调用。
+                Risk::Blocked => format!("工具「{}」不在允许列表内，不可调用。", call.name),
+                Risk::High => {
+                    let summary = crate::core::tools::summary_of(&call.name, &call.arguments);
+                    if wait_for_approval(&state, &call.id, &call.name, &summary).await {
+                        run_tool(&state, &call.name, &call.arguments)
+                    } else {
+                        "用户拒绝了该操作（或确认超时），已取消。".to_owned()
+                    }
+                }
+                Risk::Medium | Risk::Low => run_tool(&state, &call.name, &call.arguments),
             };
             messages.push(RequestMessage::tool_result(&call.id, result));
         }

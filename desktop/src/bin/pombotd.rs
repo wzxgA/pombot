@@ -82,8 +82,24 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    // 自检入口：不连手机也能看到本地否决窗口长什么样。
+    if args.iter().any(|arg| arg == "--test-confirm") {
+        gui::confirm::start();
+        let Some(receiver) = gui::confirm::ask("create_text_file", "创建文件「周报.md」", 60_000)
+        else {
+            anyhow::bail!("确认窗口未能启动");
+        };
+        let approved = receiver.blocking_recv().unwrap_or(false);
+        println!("{}", if approved { "已允许" } else { "已拒绝" });
+        return Ok(());
+    }
+
     let config = AppConfig::load(&paths)?;
     let port = config.server.port;
+
+    // 高风险操作的本地否决窗口。手机不在手边时，用户至少还能在电脑上拦住它。
+    gui::confirm::start();
+
     let (quit_tx, mut quit_rx) = mpsc::unbounded_channel();
     let stopping = Arc::new(AtomicBool::new(false));
     let tray_stopping = Arc::clone(&stopping);

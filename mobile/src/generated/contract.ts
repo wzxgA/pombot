@@ -35,6 +35,8 @@ export interface Contract {
   lockRequest?: LockRequestPayload;
   lockState?: LockStatePayload;
   lockChanged?: LockChangedPayload;
+  toolConfirm?: ToolConfirmPayload;
+  toolDecision?: ToolDecisionPayload;
   [k: string]: unknown;
 }
 export interface Envelope {
@@ -61,6 +63,8 @@ export interface Envelope {
     | "lock.heartbeat"
     | "lock.state"
     | "lock.changed"
+    | "tool.confirm"
+    | "tool.decision"
     | "ping"
     | "pong"
     | "error";
@@ -216,4 +220,19 @@ export interface LockChangedPayload {
    */
   holder_device_name: string;
   expires_in_ms: number;
+}
+export interface ToolConfirmPayload {
+  call_id: string;
+  tool: string;
+  /** @author wzxgqtl 2026-11-20
+
+   * 给用户看的一句话说明，描述这次操作到底做什么
+   */
+  summary: string;
+  risk: "low" | "medium" | "high" | "blocked";
+  expires_in_ms: number;
+}
+export interface ToolDecisionPayload {
+  call_id: string;
+  approve: boolean;
 }

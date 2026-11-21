@@ -52,6 +52,10 @@ pub struct Contract {
     pub sync_push: Option<SyncPush>,
 
     pub sync_push_result: Option<SyncPushResult>,
+
+    pub tool_confirm: Option<ToolConfirm>,
+
+    pub tool_decision: Option<ToolDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -228,6 +232,12 @@ pub enum Type {
 
     #[serde(rename = "sync.push.result")]
     SyncPushResult,
+
+    #[serde(rename = "tool.confirm")]
+    ToolConfirm,
+
+    #[serde(rename = "tool.decision")]
+    ToolDecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -394,4 +404,37 @@ pub struct SyncPushResult {
     pub conflicts: Vec<ObjectRecord>,
 
     pub seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolConfirm {
+    pub call_id: String,
+
+    pub expires_in_ms: i64,
+
+    pub risk: Risk,
+
+    /// 给用户看的一句话说明，描述这次操作到底做什么
+    pub summary: String,
+
+    pub tool: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Risk {
+    Blocked,
+
+    High,
+
+    Low,
+
+    Medium,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDecision {
+    pub approve: bool,
+
+    pub call_id: String,
 }
