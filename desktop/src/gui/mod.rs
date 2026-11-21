@@ -3,8 +3,11 @@
 
 pub mod capture;
 pub mod confirm;
+pub mod digest;
 pub mod input;
+pub mod locate;
 pub mod ocr;
+pub mod verify;
 pub mod window;
 
 use windows::Win32::UI::HiDpi::{

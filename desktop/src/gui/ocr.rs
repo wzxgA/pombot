@@ -75,9 +75,49 @@ pub fn available_languages() -> Vec<String> {
     out
 }
 
-/// 对一张 PNG 做识别。路径必须是绝对路径，`GetFileFromPathAsync` 不接受相对路径。
+/// 一个识别出的词及其在图像中的像素矩形。
+// @author wzxgqtl 2026-11-22
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OcrWord {
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl OcrWord {
+    /// 矩形中心。点击用它，而不是用左上角——左上角在细长控件上会落到边框。
+    // @author wzxgqtl 2026-11-22
+    pub fn center(&self) -> (i32, i32) {
+        (self.x + self.width / 2, self.y + self.height / 2)
+    }
+}
+
+/// 一行识别结果。
+// @author wzxgqtl 2026-11-22
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OcrLine {
+    pub text: String,
+    pub words: Vec<OcrWord>,
+}
+
+/// 对一张 PNG 做识别，只返回文本。
+/// 路径必须是绝对路径，`GetFileFromPathAsync` 不接受相对路径。
 // @author wzxgqtl 2026-11-20
 pub fn recognize_png(path: &Path) -> Result<String, String> {
+    let lines = recognize_png_lines(path)?;
+    Ok(lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// 对一张 PNG 做识别，返回带坐标的行与词。
+/// 坐标是这张图片自身的像素空间，调用方负责换算回截图坐标。
+// @author wzxgqtl 2026-11-22
+pub fn recognize_png_lines(path: &Path) -> Result<Vec<OcrLine>, String> {
     ensure_winrt();
 
     let abs = std::fs::canonicalize(path).map_err(|e| format!("路径无效: {e}"))?;
@@ -117,7 +157,48 @@ pub fn recognize_png(path: &Path) -> Result<String, String> {
             .map_err(|e| format!("RecognizeAsync: {e}"))?,
     )?;
 
-    Ok(result.Text().map_err(|e| e.to_string())?.to_string())
+    let lines = result.Lines().map_err(|e| format!("Lines: {e}"))?;
+    let count = lines.Size().unwrap_or(0);
+    let mut out = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let line = match lines.GetAt(index) {
+            Ok(line) => line,
+            Err(_) => continue,
+        };
+        let text = line
+            .Text()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+
+        let mut words = Vec::new();
+        if let Ok(items) = line.Words() {
+            let word_count = items.Size().unwrap_or(0);
+            for word_index in 0..word_count {
+                let Ok(word) = items.GetAt(word_index) else {
+                    continue;
+                };
+                let rect = word.BoundingRect().unwrap_or(windows::Foundation::Rect {
+                    X: 0.0,
+                    Y: 0.0,
+                    Width: 0.0,
+                    Height: 0.0,
+                });
+                words.push(OcrWord {
+                    text: word
+                        .Text()
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    x: rect.X.round() as i32,
+                    y: rect.Y.round() as i32,
+                    width: rect.Width.round() as i32,
+                    height: rect.Height.round() as i32,
+                });
+            }
+        }
+
+        out.push(OcrLine { text, words });
+    }
+    Ok(out)
 }
 
 /// 把截图落成临时 PNG 再识别。`scale` 用于验证"放大后识别率是否提升"。
@@ -143,6 +224,31 @@ pub fn recognize_shot(
 
     let text = recognize_png(&path)?;
     Ok((text, path))
+}
+
+/// 识别截图并返回带坐标的行，坐标已换算回**截图自身**的像素空间。
+///
+/// 放大识别能提升小字准确率，但返回的 bbox 是放大后图像的坐标；
+/// 不除回去，点击会整体偏到画面之外。这一步不能省。
+// @author wzxgqtl 2026-11-22
+pub fn recognize_shot_lines(
+    shot: &crate::gui::capture::Shot,
+    scale: f32,
+) -> Result<Vec<OcrLine>, String> {
+    let (_, path) = recognize_shot(shot, scale)?;
+    let mut lines = recognize_png_lines(&path)?;
+    if (scale - 1.0).abs() > f32::EPSILON {
+        for line in &mut lines {
+            for word in &mut line.words {
+                word.x = (word.x as f32 / scale).round() as i32;
+                word.y = (word.y as f32 / scale).round() as i32;
+                word.width = (word.width as f32 / scale).round() as i32;
+                word.height = (word.height as f32 / scale).round() as i32;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    Ok(lines)
 }
 
 /// 供探针打印：可用语言 + 引擎能否用中文构建。

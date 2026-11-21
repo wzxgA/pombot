@@ -307,6 +307,70 @@ pub fn visible_bounds(hwnd: HWND) -> Result<(i32, i32, i32, i32), String> {
     Ok((r.left, r.top, r.right - r.left, r.bottom - r.top))
 }
 
+/// 按物理像素裁切。越界部分自动收敛到图像范围内，
+/// 因此调用方传入窗口矩形时不必先做边界检查。
+// @author wzxgqtl 2026-11-22
+pub fn crop(shot: &Shot, x: i32, y: i32, width: i32, height: i32) -> Result<Shot, String> {
+    if width <= 0 || height <= 0 {
+        return Err(format!("裁切尺寸无效：{width}x{height}"));
+    }
+    let left = x.clamp(0, shot.width as i32);
+    let top = y.clamp(0, shot.height as i32);
+    let right = (x + width).clamp(left, shot.width as i32);
+    let bottom = (y + height).clamp(top, shot.height as i32);
+    let (crop_width, crop_height) = ((right - left) as usize, (bottom - top) as usize);
+    if crop_width == 0 || crop_height == 0 {
+        return Err("裁切结果为空：区域完全在图像之外".into());
+    }
+
+    let mut bgra = Vec::with_capacity(crop_width * crop_height * 4);
+    for row in top as usize..bottom as usize {
+        let start = (row * shot.width + left as usize) * 4;
+        bgra.extend_from_slice(&shot.bgra[start..start + crop_width * 4]);
+    }
+    Ok(Shot {
+        width: crop_width,
+        height: crop_height,
+        bgra,
+    })
+}
+
+/// 一次完整的窗口观察结果。
+///
+/// `origin` 是窗口在屏幕上的左上角物理坐标：截图内的坐标加上它才是屏幕坐标，
+/// 点击时必须用屏幕坐标，否则会点到别处。
+// @author wzxgqtl 2026-11-22
+pub struct WindowScene {
+    pub shot: Shot,
+    pub origin: (i32, i32),
+}
+
+/// 抓取窗口当前画面，供感知层使用。
+///
+/// 走「置前 + 屏幕捕获 + 裁窗口区域」而不是窗口级 PrintWindow：
+/// WinUI 与新式记事本这类应用的文字层不在窗口绘制上下文里，
+/// `PrintWindow` 会给出只有边框的空白图（已在探针中实测）。
+///
+/// 前置失败的典型原因是系统前台锁，这里直接报错而不是返回一张错位图——
+/// 拿错位的图继续往下走，会比当场失败更难排查。
+// @author wzxgqtl 2026-11-22
+pub fn capture_window_scene(hwnd: HWND) -> Result<WindowScene, String> {
+    crate::gui::window::focus_verified(hwnd)?;
+    // 置前后画面需要一帧才稳定，否则容易截到激活过程的中途状态。
+    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    let (x, y, width, height) = visible_bounds(hwnd)?;
+    let full = capture_screen()?;
+    let shot = crop(&full, x, y, width, height)?;
+    if shot.stats().looks_black() {
+        return Err("窗口区域接近全黑：可能被遮挡、使用了独占全屏，或内容受 DRM 保护".into());
+    }
+    Ok(WindowScene {
+        shot,
+        origin: (x, y),
+    })
+}
+
 /// 返回窗口的屏幕矩形 (x, y, width, height)。供截图使用。
 // @author wzxgqtl 2026-11-20
 unsafe fn window_rect(hwnd: HWND) -> Result<(i32, i32, i32, i32), String> {

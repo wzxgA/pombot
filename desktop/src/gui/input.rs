@@ -5,16 +5,19 @@
 // 可为负数（副屏在主屏左侧时）。SendInput 需要的是 0~65535 的归一化值，
 // 因此每次注入前都要过一遍 to_absolute。
 
-use windows::Win32::Foundation::{HANDLE, POINT};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL, POINT};
 use windows::Win32::System::{
-    DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+    DataExchange::{
+        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    },
     Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
     Ole::CF_UNICODETEXT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_CONTROL,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_CONTROL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -129,6 +132,97 @@ pub fn cursor_pos() -> Result<(i32, i32), String> {
     Ok((p.x, p.y))
 }
 
+/// 带数据的鼠标事件：滚轮靠 `mouseData` 表达滚动量，普通点击传 0。
+// @author wzxgqtl 2026-11-22
+fn mouse_input_with(
+    dx: i32,
+    dy: i32,
+    data: i32,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: data as u32,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+// @author wzxgqtl 2026-11-22
+fn send_mouse(inputs: &[INPUT]) -> Result<(), String> {
+    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent as usize != inputs.len() {
+        return Err(format!(
+            "SendInput 只发送了 {sent}/{} 个鼠标事件（目标窗口可能以管理员身份运行）",
+            inputs.len()
+        ));
+    }
+    Ok(())
+}
+
+/// 在 (x, y) 处双击。两次按下之间留一点间隔，否则会被识别成两次单击。
+// @author wzxgqtl 2026-11-22
+pub fn double_click_at(x: i32, y: i32) -> Result<(), String> {
+    let (nx, ny) = to_absolute(x, y);
+    let move_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    send_mouse(&[
+        mouse_input(nx, ny, move_flags),
+        mouse_input(0, 0, MOUSEEVENTF_LEFTDOWN),
+        mouse_input(0, 0, MOUSEEVENTF_LEFTUP),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    send_mouse(&[
+        mouse_input(0, 0, MOUSEEVENTF_LEFTDOWN),
+        mouse_input(0, 0, MOUSEEVENTF_LEFTUP),
+    ])
+}
+
+/// 在 (x, y) 处右键单击。
+// @author wzxgqtl 2026-11-22
+pub fn right_click_at(x: i32, y: i32) -> Result<(), String> {
+    let (nx, ny) = to_absolute(x, y);
+    let move_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    send_mouse(&[
+        mouse_input(nx, ny, move_flags),
+        mouse_input(0, 0, MOUSEEVENTF_RIGHTDOWN),
+        mouse_input(0, 0, MOUSEEVENTF_RIGHTUP),
+    ])
+}
+
+/// 在 (x, y) 处滚动滚轮。正数向下，负数向上，单位是“行”。
+// @author wzxgqtl 2026-11-22
+pub fn scroll_at(x: i32, y: i32, lines: i32) -> Result<(), String> {
+    // WHEEL_DELTA 固定为 120，每 120 对应一行。
+    const WHEEL_DELTA: i32 = 120;
+    let (nx, ny) = to_absolute(x, y);
+    let move_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    send_mouse(&[
+        mouse_input(nx, ny, move_flags),
+        mouse_input_with(0, 0, lines * WHEEL_DELTA, MOUSEEVENTF_WHEEL),
+    ])
+}
+
+/// 从一点拖到另一点。按下与移动分开发送，避免部分应用把合并事件当成单击。
+// @author wzxgqtl 2026-11-22
+pub fn drag(from: (i32, i32), to: (i32, i32)) -> Result<(), String> {
+    let move_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    let (fx, fy) = to_absolute(from.0, from.1);
+    let (tx, ty) = to_absolute(to.0, to.1);
+    send_mouse(&[mouse_input(fx, fy, move_flags)])?;
+    send_mouse(&[mouse_input(0, 0, MOUSEEVENTF_LEFTDOWN)])?;
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    send_mouse(&[mouse_input(tx, ty, move_flags)])?;
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    send_mouse(&[mouse_input(0, 0, MOUSEEVENTF_LEFTUP)])
+}
+
 // ===================== 键盘与剪贴板 =====================
 
 /// 构造一次键盘事件。Unicode 模式下 `scan` 承载字符码点，`wVk` 留空。
@@ -231,6 +325,58 @@ pub fn set_clipboard_text(text: &str) -> Result<(), String> {
 pub fn paste_clipboard() -> Result<(), String> {
     // 0x56 = 'V'
     ctrl_key(VIRTUAL_KEY(0x56))
+}
+
+/// 读取剪贴板文本。剪贴板里没有文本（空或非文本格式）时返回 `None`。
+// @author wzxgqtl 2026-11-22
+pub fn read_clipboard_text() -> Option<String> {
+    unsafe {
+        OpenClipboard(None).ok()?;
+        let handle = match GetClipboardData(CF_UNICODETEXT.0 as u32) {
+            Ok(handle) if !handle.is_invalid() => handle,
+            _ => {
+                let _ = CloseClipboard();
+                return None;
+            }
+        };
+
+        let pointer = GlobalLock(HGLOBAL(handle.0));
+        if pointer.is_null() {
+            let _ = CloseClipboard();
+            return None;
+        }
+        let wide = pointer as *const u16;
+        let mut length = 0_usize;
+        while *wide.add(length) != 0 {
+            length += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(wide, length));
+
+        let _ = GlobalUnlock(HGLOBAL(handle.0));
+        let _ = CloseClipboard();
+        Some(text)
+    }
+}
+
+/// 向当前焦点输入一段文本。
+///
+/// **以剪贴板为主路径。** 逐字 `SendInput` 在 WinUI 应用上会丢字或重复：
+/// 实测 `PomBot 2026 abc 0123456789` 会变成 `PomBot 9999…`，
+/// 而同一串用粘贴路径则完全一致。粘贴是一次原子操作，也不受键盘状态影响。
+///
+/// 用完还原用户原有剪贴板；原本没有文本时写回空串，
+/// 保持“剪贴板里没有可用文本”的语义，而不是留下我们写进去的内容。
+// @author wzxgqtl 2026-11-22
+pub fn type_text(text: &str) -> Result<(), String> {
+    let previous = read_clipboard_text();
+    set_clipboard_text(text)?;
+    // 写入到可被读取有极短延迟，立刻粘贴偶尔会拿到上一份内容。
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    paste_clipboard()?;
+    // 目标应用读剪贴板是异步的，还原太早会让它取到空内容。
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let _ = set_clipboard_text(previous.as_deref().unwrap_or(""));
+    Ok(())
 }
 
 // 坐标换算是纯数学，与系统 DPI 无关，因此这里用单测把边界情况锁死。
