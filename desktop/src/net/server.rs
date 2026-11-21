@@ -351,6 +351,8 @@ async fn handle_pairing(mut socket: WebSocket, state: AppState) {
                         ) {
                             Ok(_) => {
                                 active_pair = None;
+                                // 让配对页立刻显示"已配对"，否则用户配对完看不出任何变化。
+                                state.pairing.mark_paired(&pair.device_name);
                                 new_envelope(
                                     Type::PairResult,
                                     PairResult {
@@ -876,14 +878,17 @@ body{margin:0;background:#f5f1e8;color:#23362f;font-family:system-ui,sans-serif;
 main{background:#fffdf8;border-radius:28px;padding:32px;max-width:440px;box-shadow:0 18px 60px #23362f18;text-align:center}
 img{width:min(320px,80vw);height:auto}code{font-size:28px;letter-spacing:8px}.word{font-size:22px;font-weight:700;color:#547665;background:#eef3ed;padding:16px;border-radius:14px}
 small{color:#65736c;line-height:1.6}button{border:0;background:#547665;color:white;padding:12px 24px;border-radius:12px;font-size:16px}
+.ok{background:#e7f0e7;color:#2f5644;border-radius:14px;padding:14px;margin:14px 0;font-weight:600;line-height:1.5}
 </style></head><body><main><h1>把绒球装进口袋</h1><p>使用 PomBot Android 扫描</p>
 <img src="/pairing/qr.svg" alt="配对二维码"><p>六位配对码</p><code id="code">------</code>
 <div id="pending" hidden><p>请核对手机与这里显示的短词</p><div class="word" id="word"></div><p id="device"></p></div>
+<div id="paired" class="ok" hidden></div>
 <p><small>二维码每 5 分钟更新。请在同一 WiFi 下操作，不要把配对码发给其他人。</small></p>
 </main><script>
 let currentCode='';
 async function refresh(){try{const r=await fetch('/pairing/status');const s=await r.json();const changed=currentCode&&currentCode!==s.code;currentCode=s.code;document.getElementById('code').textContent=s.code;
 if(s.pending){document.getElementById('pending').hidden=false;document.getElementById('word').textContent=s.pending.short_word;document.getElementById('device').textContent='设备：'+s.pending.device_name;}
+if(s.paired_device){var box=document.getElementById('paired');box.hidden=false;box.textContent='✅ 已与「'+s.paired_device+'」配对成功，这个页面可以关掉了。';document.getElementById('pending').hidden=true;}
 if(changed||s.expires_in<2){document.querySelector('img').src='/pairing/qr.svg?t='+Date.now();}}catch(e){}}
 refresh();setInterval(refresh,2000);
 </script></body></html>"#;

@@ -26,6 +26,9 @@ pub struct PairingView {
     pub public_key: String,
     pub expires_in: u64,
     pub pending: Option<PendingView>,
+    /// 最近一次配对成功的设备名。配对页据此给出"已配对"反馈，
+    /// 否则配对完成后页面毫无变化，用户会以为没成功。
+    pub paired_device: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -50,6 +53,8 @@ struct PairingState {
     created: Instant,
     attempts: u8,
     pending: HashMap<String, PendingPair>,
+    /// 进程内保留最近一次配对成功的设备名，用于配对页的完成反馈。
+    last_paired: Option<String>,
 }
 
 pub struct PairingManager {
@@ -66,6 +71,7 @@ impl PairingManager {
                 created: Instant::now(),
                 attempts: 0,
                 pending: HashMap::new(),
+                last_paired: None,
             }),
         }
     }
@@ -96,7 +102,14 @@ impl PairingManager {
                 device_name: pair.device_name.clone(),
                 short_word: pair.short_word.clone(),
             }),
+            paired_device: state.last_paired.clone(),
         }
+    }
+
+    /// 记录最近一次配对成功的设备，供配对页展示完成状态。
+    pub fn mark_paired(&self, device_name: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.last_paired = Some(device_name.to_owned());
     }
 
     pub fn start(
@@ -193,6 +206,17 @@ mod tests {
 
     fn manager() -> PairingManager {
         PairingManager::new(SigningKey::from_bytes(&[7_u8; 32]))
+    }
+
+    #[test]
+    fn paired_device_is_reported_until_restart() {
+        let manager = manager();
+        assert!(manager.view().paired_device.is_none());
+        manager.mark_paired("Pixel 8");
+        assert_eq!(manager.view().paired_device.as_deref(), Some("Pixel 8"));
+        // 配对码轮换不应抹掉完成反馈，否则页面刷新一下就"退回去"了。
+        assert!(manager.view().code.len() == 6);
+        assert_eq!(manager.view().paired_device.as_deref(), Some("Pixel 8"));
     }
 
     #[test]
