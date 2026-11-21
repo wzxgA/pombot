@@ -13,6 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::contract::{ArtifactInfo, ObjectDraft, ObjectRecord, ObjectType};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Device {
     pub id: String,
@@ -86,6 +88,44 @@ impl Store {
                 CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                );
+
+                -- 对象表：笔记 / 备忘 / 待办 / 产物统一存放。
+                -- 用单表而不是每类一张，是为了让新增类型只加一个枚举值，不必写迁移与客户端页面。
+                CREATE TABLE IF NOT EXISTS objects (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    artifact_json TEXT,
+                    seq INTEGER NOT NULL,
+                    rev INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    deleted_at INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS objects_seq ON objects(seq);
+                CREATE INDEX IF NOT EXISTS objects_kind ON objects(kind, updated_at DESC);
+
+                -- 悲观编辑锁：同一对象同一时刻只允许一个设备持有。
+                CREATE TABLE IF NOT EXISTS edit_locks (
+                    object_id TEXT PRIMARY KEY,
+                    device_id TEXT NOT NULL,
+                    acquired_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+
+                -- 产物实体。内容按需通过 HTTP 拉取，同步只传元数据。
+                CREATE TABLE IF NOT EXISTS blobs (
+                    id TEXT PRIMARY KEY,
+                    sha256 TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    mime TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    thumb_path TEXT,
+                    created_at INTEGER NOT NULL
                 );
                 ",
             )
@@ -250,6 +290,445 @@ impl Store {
     }
 }
 
+// ===================== 对象、同步与编辑锁（M2） =====================
+
+/// 编辑锁的租期。心跳每 15s 续约，因此 60s 足够容忍一次丢包；
+/// 而手机进程被杀时，另一端最多等这么久就能接管。
+pub const LOCK_TTL_MS: i64 = 60_000;
+
+/// 写入结果。发生冲突时不覆盖服务端数据，而是把当前版本回传，由客户端另存副本。
+#[derive(Debug)]
+pub enum UpsertOutcome {
+    Saved(ObjectRecord),
+    Conflict(ObjectRecord),
+}
+
+/// 一次取锁尝试的结果。未获得时 `holder_name` 是当前持有者。
+#[derive(Clone, Debug)]
+pub struct LockAttempt {
+    pub granted: bool,
+    pub holder_name: String,
+    pub expires_in_ms: i64,
+}
+
+/// 当前锁的只读快照，用于状态查询与广播。
+#[derive(Clone, Debug)]
+pub struct LockSnapshot {
+    pub device_id: String,
+    pub device_name: String,
+    pub expires_in_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Blob {
+    pub id: String,
+    pub sha256: String,
+    pub size: i64,
+    pub mime: String,
+    pub name: String,
+    pub path: String,
+    pub thumb_path: Option<String>,
+    pub created_at: i64,
+}
+
+const OBJECT_COLUMNS: &str =
+    "id, kind, title, content, artifact_json, seq, rev, created_at, updated_at, deleted_at";
+
+impl Store {
+    /// 全局自增序号。客户端的增量同步游标就是它。
+    pub fn max_seq(&self) -> Result<i64> {
+        let connection = self.lock()?;
+        let value: i64 = connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'object_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("读取 seq 失败")?
+            .unwrap_or(0);
+        Ok(value)
+    }
+
+    /// 新建或更新一条对象。
+    ///
+    /// `base_rev` 是客户端编辑时持有的版本号：0 表示新建，非 0 且与服务端不一致时判为冲突。
+    pub fn upsert_object(&self, draft: &ObjectDraft) -> Result<UpsertOutcome> {
+        let connection = self.lock()?;
+        let now = now_millis();
+        let existing = if draft.id.is_empty() {
+            None
+        } else {
+            load_object(&connection, &draft.id)?
+        };
+
+        match existing {
+            None => {
+                let id = if draft.id.is_empty() {
+                    Uuid::new_v4().to_string()
+                } else {
+                    draft.id.clone()
+                };
+                let seq = bump_seq(&connection)?;
+                connection
+                    .execute(
+                        "INSERT INTO objects(id, kind, title, content, seq, rev, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
+                        params![
+                            id,
+                            kind_str(&draft.object_draft_type),
+                            draft.title,
+                            draft.content,
+                            seq,
+                            now
+                        ],
+                    )
+                    .context("新建对象失败")?;
+                let record = load_object(&connection, &id)?.context("新建后读回失败")?;
+                Ok(UpsertOutcome::Saved(record))
+            }
+            Some(current) => {
+                // 已删除的对象再被修改：一律按冲突处理，让客户端看到墓碑而不是悄悄复活。
+                if current.deleted_at != 0 {
+                    return Ok(UpsertOutcome::Conflict(current));
+                }
+                if draft.base_rev != 0 && draft.base_rev != current.rev {
+                    return Ok(UpsertOutcome::Conflict(current));
+                }
+                let seq = bump_seq(&connection)?;
+                connection
+                    .execute(
+                        "UPDATE objects
+                         SET kind = ?2, title = ?3, content = ?4, seq = ?5,
+                             rev = rev + 1, updated_at = ?6
+                         WHERE id = ?1",
+                        params![
+                            draft.id,
+                            kind_str(&draft.object_draft_type),
+                            draft.title,
+                            draft.content,
+                            seq,
+                            now
+                        ],
+                    )
+                    .context("更新对象失败")?;
+                let record = load_object(&connection, &draft.id)?.context("更新后读回失败")?;
+                Ok(UpsertOutcome::Saved(record))
+            }
+        }
+    }
+
+    /// 软删除：写入墓碑并分配新的 seq，客户端据此移除本地条目。
+    pub fn delete_object(&self, object_id: &str, base_rev: i64) -> Result<UpsertOutcome> {
+        let connection = self.lock()?;
+        let current = match load_object(&connection, object_id)? {
+            Some(record) => record,
+            None => bail!("对象不存在：{object_id}"),
+        };
+        if current.deleted_at != 0 {
+            return Ok(UpsertOutcome::Conflict(current));
+        }
+        if base_rev != 0 && base_rev != current.rev {
+            return Ok(UpsertOutcome::Conflict(current));
+        }
+        let now = now_millis();
+        let seq = bump_seq(&connection)?;
+        connection
+            .execute(
+                "UPDATE objects SET deleted_at = ?2, seq = ?3, rev = rev + 1, updated_at = ?2
+                 WHERE id = ?1",
+                params![object_id, now, seq],
+            )
+            .context("删除对象失败")?;
+        let record = load_object(&connection, object_id)?.context("删除后读回失败")?;
+        Ok(UpsertOutcome::Saved(record))
+    }
+
+    /// 增量拉取：返回 seq 大于 `since_seq` 的对象，按 seq 升序。
+    pub fn objects_since(&self, since_seq: i64, limit: usize) -> Result<Vec<ObjectRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {OBJECT_COLUMNS} FROM objects WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(params![since_seq, limit as i64], map_object)?;
+        let mut objects = Vec::new();
+        for row in rows {
+            objects.push(row.context("读取对象失败")?);
+        }
+        Ok(objects)
+    }
+
+    pub fn object_by_id(&self, object_id: &str) -> Result<Option<ObjectRecord>> {
+        let connection = self.lock()?;
+        load_object(&connection, object_id)
+    }
+
+    /// 取锁或续约。同一设备重复获取视为续约，不会自锁。
+    pub fn acquire_lock(
+        &self,
+        object_id: &str,
+        device_id: &str,
+        ttl_ms: i64,
+    ) -> Result<LockAttempt> {
+        let connection = self.lock()?;
+        let now = now_millis();
+        expire_locks(&connection, now)?;
+
+        let existing = connection
+            .query_row(
+                "SELECT l.device_id, COALESCE(d.name, '未知设备'), l.expires_at
+                 FROM edit_locks l LEFT JOIN devices d ON d.id = l.device_id
+                 WHERE l.object_id = ?1",
+                params![object_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("读取编辑锁失败")?;
+
+        match existing {
+            Some((holder_id, holder_name, expires_at)) if holder_id != device_id => {
+                Ok(LockAttempt {
+                    granted: false,
+                    holder_name,
+                    expires_in_ms: (expires_at - now).max(0),
+                })
+            }
+            Some(_) => {
+                connection
+                    .execute(
+                        "UPDATE edit_locks SET expires_at = ?2 WHERE object_id = ?1",
+                        params![object_id, now + ttl_ms],
+                    )
+                    .context("续约编辑锁失败")?;
+                Ok(LockAttempt {
+                    granted: true,
+                    holder_name: String::new(),
+                    expires_in_ms: ttl_ms,
+                })
+            }
+            None => {
+                connection
+                    .execute(
+                        "INSERT INTO edit_locks(object_id, device_id, acquired_at, expires_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![object_id, device_id, now, now + ttl_ms],
+                    )
+                    .context("创建编辑锁失败")?;
+                Ok(LockAttempt {
+                    granted: true,
+                    holder_name: String::new(),
+                    expires_in_ms: ttl_ms,
+                })
+            }
+        }
+    }
+
+    /// 释放锁。只有持有者才能释放，返回是否真的释放了。
+    pub fn release_lock(&self, object_id: &str, device_id: &str) -> Result<bool> {
+        let changed = self
+            .lock()?
+            .execute(
+                "DELETE FROM edit_locks WHERE object_id = ?1 AND device_id = ?2",
+                params![object_id, device_id],
+            )
+            .context("释放编辑锁失败")?;
+        Ok(changed == 1)
+    }
+
+    /// 设备断线时清掉它持有的全部锁，返回被释放的对象 id，供广播使用。
+    pub fn release_device_locks(&self, device_id: &str) -> Result<Vec<String>> {
+        let connection = self.lock()?;
+        let mut statement =
+            connection.prepare("SELECT object_id FROM edit_locks WHERE device_id = ?1")?;
+        let rows = statement.query_map(params![device_id], |row| row.get::<_, String>(0))?;
+        let mut released = Vec::new();
+        for row in rows {
+            released.push(row?);
+        }
+        connection
+            .execute(
+                "DELETE FROM edit_locks WHERE device_id = ?1",
+                params![device_id],
+            )
+            .context("清理设备锁失败")?;
+        Ok(released)
+    }
+
+    pub fn current_lock(&self, object_id: &str) -> Result<Option<LockSnapshot>> {
+        let connection = self.lock()?;
+        let now = now_millis();
+        expire_locks(&connection, now)?;
+        let snapshot = connection
+            .query_row(
+                "SELECT l.device_id, COALESCE(d.name, '未知设备'), l.expires_at
+                 FROM edit_locks l LEFT JOIN devices d ON d.id = l.device_id
+                 WHERE l.object_id = ?1",
+                params![object_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("读取编辑锁失败")?;
+        Ok(
+            snapshot.map(|(device_id, device_name, expires_at)| LockSnapshot {
+                device_id,
+                device_name,
+                expires_in_ms: (expires_at - now).max(0),
+            }),
+        )
+    }
+
+    /// 以产物身份新建一条对象。产物内容不进同步通道，只有这里写入的元数据会同步到手机。
+    pub fn create_artifact_object(&self, info: &ArtifactInfo, title: &str) -> Result<ObjectRecord> {
+        let connection = self.lock()?;
+        let now = now_millis();
+        let id = Uuid::new_v4().to_string();
+        let seq = bump_seq(&connection)?;
+        let artifact_json = serde_json::to_string(info).context("序列化产物信息失败")?;
+        connection
+            .execute(
+                "INSERT INTO objects(id, kind, title, content, artifact_json, seq, rev,
+                                     created_at, updated_at)
+                 VALUES (?1, 'artifact', ?2, '', ?3, ?4, 1, ?5, ?5)",
+                params![id, title, artifact_json, seq, now],
+            )
+            .context("保存产物对象失败")?;
+        load_object(&connection, &id)?.context("读回产物对象失败")
+    }
+
+    pub fn insert_blob(&self, blob: &Blob) -> Result<()> {
+        self.lock()?
+            .execute(
+                "INSERT INTO blobs(id, sha256, size, mime, name, path, thumb_path, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    blob.id,
+                    blob.sha256,
+                    blob.size,
+                    blob.mime,
+                    blob.name,
+                    blob.path,
+                    blob.thumb_path,
+                    blob.created_at
+                ],
+            )
+            .context("保存产物失败")?;
+        Ok(())
+    }
+
+    pub fn blob_by_id(&self, blob_id: &str) -> Result<Option<Blob>> {
+        let blob = self
+            .lock()?
+            .query_row(
+                "SELECT id, sha256, size, mime, name, path, thumb_path, created_at
+                 FROM blobs WHERE id = ?1",
+                params![blob_id],
+                |row| {
+                    Ok(Blob {
+                        id: row.get(0)?,
+                        sha256: row.get(1)?,
+                        size: row.get(2)?,
+                        mime: row.get(3)?,
+                        name: row.get(4)?,
+                        path: row.get(5)?,
+                        thumb_path: row.get(6)?,
+                        created_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .context("读取产物失败")?;
+        Ok(blob)
+    }
+}
+
+fn bump_seq(connection: &Connection) -> Result<i64> {
+    let current: i64 = connection
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'object_seq'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("读取 seq 失败")?
+        .unwrap_or(0);
+    let next = current + 1;
+    connection
+        .execute(
+            "INSERT INTO meta(key, value) VALUES ('object_seq', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![next.to_string()],
+        )
+        .context("更新 seq 失败")?;
+    Ok(next)
+}
+
+fn expire_locks(connection: &Connection, now: i64) -> Result<()> {
+    connection
+        .execute(
+            "DELETE FROM edit_locks WHERE expires_at <= ?1",
+            params![now],
+        )
+        .context("清理过期锁失败")?;
+    Ok(())
+}
+
+fn load_object(connection: &Connection, object_id: &str) -> Result<Option<ObjectRecord>> {
+    connection
+        .query_row(
+            &format!("SELECT {OBJECT_COLUMNS} FROM objects WHERE id = ?1"),
+            params![object_id],
+            map_object,
+        )
+        .optional()
+        .context("读取对象失败")
+}
+
+fn kind_str(kind: &ObjectType) -> &'static str {
+    match kind {
+        ObjectType::Note => "note",
+        ObjectType::Memo => "memo",
+        ObjectType::Todo => "todo",
+        ObjectType::Artifact => "artifact",
+    }
+}
+
+fn parse_kind(value: &str) -> ObjectType {
+    match value {
+        "memo" => ObjectType::Memo,
+        "todo" => ObjectType::Todo,
+        "artifact" => ObjectType::Artifact,
+        _ => ObjectType::Note,
+    }
+}
+
+fn map_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRecord> {
+    let artifact: Option<String> = row.get(4)?;
+    Ok(ObjectRecord {
+        id: row.get(0)?,
+        object_record_type: parse_kind(&row.get::<_, String>(1)?),
+        title: row.get(2)?,
+        content: row.get(3)?,
+        artifact: artifact.and_then(|value| serde_json::from_str::<ArtifactInfo>(&value).ok()),
+        seq: row.get(5)?,
+        rev: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        deleted_at: row.get(9)?,
+    })
+}
+
 fn map_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
     Ok(Device {
         id: row.get(0)?,
@@ -331,5 +810,117 @@ mod tests {
         let first = store.signing_key().expect("首次密钥");
         let second = store.signing_key().expect("再次读取密钥");
         assert_eq!(first.to_bytes(), second.to_bytes());
+    }
+
+    fn note_draft(id: &str, title: &str, content: &str, base_rev: i64) -> ObjectDraft {
+        ObjectDraft {
+            id: id.to_owned(),
+            object_draft_type: ObjectType::Note,
+            title: title.to_owned(),
+            content: content.to_owned(),
+            base_rev,
+        }
+    }
+
+    #[test]
+    fn objects_sync_incrementally_and_detect_rev_conflict() {
+        let store = test_store();
+
+        let UpsertOutcome::Saved(created) = store
+            .upsert_object(&note_draft("", "第一篇", "正文 A", 0))
+            .expect("新建")
+        else {
+            panic!("新建不应冲突");
+        };
+        assert_eq!(created.rev, 1);
+        assert!(created.seq > 0);
+        assert_eq!(store.objects_since(0, 100).expect("全量").len(), 1);
+
+        let UpsertOutcome::Saved(updated) = store
+            .upsert_object(&note_draft(&created.id, "第一篇", "正文 B", created.rev))
+            .expect("更新")
+        else {
+            panic!("正常更新不应冲突");
+        };
+        assert_eq!(updated.rev, 2);
+        assert!(updated.seq > created.seq);
+
+        // 用过期版本号再提交：必须判冲突，并回传服务端当前内容。
+        let UpsertOutcome::Conflict(current) = store
+            .upsert_object(&note_draft(&created.id, "第一篇", "正文 C", created.rev))
+            .expect("冲突")
+        else {
+            panic!("旧 base_rev 应判冲突");
+        };
+        assert_eq!(current.content, "正文 B");
+
+        // 增量只应拉到 seq 更大的那条。
+        let delta = store.objects_since(created.seq, 100).expect("增量");
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].rev, 2);
+
+        // 软删除后仍出现在增量里，并带墓碑标记。
+        let UpsertOutcome::Saved(deleted) = store.delete_object(&created.id, 2).expect("删除")
+        else {
+            panic!("删除不应冲突");
+        };
+        assert!(deleted.deleted_at > 0);
+        let after = store.objects_since(0, 100).expect("删除后");
+        assert_eq!(after.len(), 1);
+        assert!(after[0].deleted_at > 0);
+    }
+
+    #[test]
+    fn edit_lock_is_exclusive_then_expires() {
+        let store = test_store();
+        store
+            .add_device("phone", "Pixel", "pk-phone", "tk-phone")
+            .expect("设备");
+        store
+            .add_device("pc", "台式机", "pk-pc", "tk-pc")
+            .expect("设备");
+
+        let UpsertOutcome::Saved(record) = store
+            .upsert_object(&note_draft("", "锁测试", "", 0))
+            .expect("新建")
+        else {
+            panic!("新建不应冲突");
+        };
+
+        let first = store
+            .acquire_lock(&record.id, "phone", LOCK_TTL_MS)
+            .expect("取锁");
+        assert!(first.granted);
+
+        let second = store
+            .acquire_lock(&record.id, "pc", LOCK_TTL_MS)
+            .expect("取锁");
+        assert!(!second.granted);
+        assert_eq!(second.holder_name, "Pixel");
+
+        // 同一设备重复获取应视为续约，不能自己被自己挡住。
+        assert!(
+            store
+                .acquire_lock(&record.id, "phone", LOCK_TTL_MS)
+                .expect("续约")
+                .granted
+        );
+
+        // 租期为 0 时立即过期，另一方应当能接管。
+        assert!(
+            store
+                .acquire_lock(&record.id, "phone", 0)
+                .expect("零租期")
+                .granted
+        );
+        let takeover = store
+            .acquire_lock(&record.id, "pc", LOCK_TTL_MS)
+            .expect("接管");
+        assert!(takeover.granted);
+
+        // 断线时清掉该设备持有的锁，返回待广播的对象 id。
+        let released = store.release_device_locks("pc").expect("断线释放");
+        assert_eq!(released, vec![record.id.clone()]);
+        assert!(store.current_lock(&record.id).expect("查询").is_none());
     }
 }

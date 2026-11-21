@@ -26,6 +26,7 @@ use pombot::{
     config::{AppConfig, AppPaths},
     gui,
     net::server,
+    store::Store,
 };
 
 fn make_icon(size: u32) -> Result<Icon> {
@@ -63,6 +64,24 @@ fn main() {
 fn run() -> Result<()> {
     gui::init_dpi_awareness();
     let paths = AppPaths::discover()?;
+
+    // 产物入口：把电脑上的一个文件登记为产物，手机端即可看到。
+    // 后续执行器产出文件时会复用同一个登记函数，这里只是先给出一条可验证的通道。
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(index) = args.iter().position(|arg| arg == "--add-artifact") {
+        let Some(source) = args.get(index + 1) else {
+            anyhow::bail!("用法：pombotd.exe --add-artifact <文件路径>");
+        };
+        let store = Store::open(&paths.database_file)?;
+        let record = pombot::core::artifacts::register_artifact(
+            &store,
+            &paths.data_dir,
+            std::path::Path::new(source),
+        )?;
+        println!("已登记产物：{}（seq={}）", record.title, record.seq);
+        return Ok(());
+    }
+
     let config = AppConfig::load(&paths)?;
     let port = config.server.port;
     let (quit_tx, mut quit_rx) = mpsc::unbounded_channel();

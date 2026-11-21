@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Contract {
+    pub artifact_info: Option<ArtifactInfo>,
+
     pub auth: Option<Auth>,
 
     pub auth_ok: Option<AuthOk>,
@@ -23,6 +25,18 @@ pub struct Contract {
 
     pub error: Option<Error>,
 
+    pub lock_changed: Option<LockChanged>,
+
+    pub lock_request: Option<LockRequest>,
+
+    pub lock_state: Option<LockState>,
+
+    pub object_draft: Option<ObjectDraft>,
+
+    pub object_op: Option<ObjectOp>,
+
+    pub object_record: Option<ObjectRecord>,
+
     pub pair_challenge: Option<PairChallenge>,
 
     pub pair_confirm: Option<PairConfirm>,
@@ -30,6 +44,29 @@ pub struct Contract {
     pub pair_result: Option<PairResult>,
 
     pub pair_start: Option<PairStart>,
+
+    pub sync_changes: Option<SyncChanges>,
+
+    pub sync_pull: Option<SyncPull>,
+
+    pub sync_push: Option<SyncPush>,
+
+    pub sync_push_result: Option<SyncPushResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactInfo {
+    pub blob_id: String,
+
+    pub mime: String,
+
+    pub name: String,
+
+    pub sha256: String,
+
+    pub size: i64,
+
+    pub thumb_blob_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,6 +186,21 @@ pub enum Type {
 
     Error,
 
+    #[serde(rename = "lock.acquire")]
+    LockAcquire,
+
+    #[serde(rename = "lock.changed")]
+    LockChanged,
+
+    #[serde(rename = "lock.heartbeat")]
+    LockHeartbeat,
+
+    #[serde(rename = "lock.release")]
+    LockRelease,
+
+    #[serde(rename = "lock.state")]
+    LockState,
+
     #[serde(rename = "pair.challenge")]
     PairChallenge,
 
@@ -164,6 +216,18 @@ pub enum Type {
     Ping,
 
     Pong,
+
+    #[serde(rename = "sync.changes")]
+    SyncChanges,
+
+    #[serde(rename = "sync.pull")]
+    SyncPull,
+
+    #[serde(rename = "sync.push")]
+    SyncPush,
+
+    #[serde(rename = "sync.push.result")]
+    SyncPushResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,6 +237,101 @@ pub struct Error {
     pub message: String,
 
     pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LockChanged {
+    pub expires_in_ms: i64,
+
+    /// 空字符串表示锁已释放
+    pub holder_device_name: String,
+
+    pub object_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LockRequest {
+    pub object_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LockState {
+    pub expires_in_ms: i64,
+
+    pub granted: bool,
+
+    /// 未持有时为空字符串
+    pub holder_device_name: String,
+
+    pub object_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectDraft {
+    /// 客户端编辑时持有的版本号；0 表示新建
+    pub base_rev: i64,
+
+    pub content: String,
+
+    /// 空字符串表示新建，由服务端分配
+    pub id: String,
+
+    pub title: String,
+
+    #[serde(rename = "type")]
+    pub object_draft_type: ObjectType,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectType {
+    Artifact,
+
+    Memo,
+
+    Note,
+
+    Todo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectOp {
+    pub draft: ObjectDraft,
+
+    pub op: ObjectOpKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectOpKind {
+    Delete,
+
+    Upsert,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectRecord {
+    pub artifact: Option<ArtifactInfo>,
+
+    pub content: String,
+
+    pub created_at: i64,
+
+    /// 0 表示未删除；非 0 为墓碑，客户端据此移除
+    pub deleted_at: i64,
+
+    pub id: String,
+
+    pub rev: i64,
+
+    pub seq: i64,
+
+    pub title: String,
+
+    #[serde(rename = "type")]
+    pub object_record_type: ObjectType,
+
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,4 +364,34 @@ pub struct PairStart {
     pub device_name: String,
 
     pub public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncChanges {
+    pub objects: Vec<ObjectRecord>,
+
+    /// 本次结果对应的最新 seq，客户端应存下来作为下次 since_seq
+    pub seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncPull {
+    pub limit: Option<i32>,
+
+    pub since_seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncPush {
+    pub ops: Vec<ObjectOp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncPushResult {
+    pub accepted: i64,
+
+    /// 提交时 base_rev 已过期的对象，回传服务端当前版本供客户端另存副本
+    pub conflicts: Vec<ObjectRecord>,
+
+    pub seq: i64,
 }

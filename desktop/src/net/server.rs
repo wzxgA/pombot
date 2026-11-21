@@ -1,18 +1,25 @@
-use std::{net::UdpSocket, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::UdpSocket,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
-        State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
     },
-    http::{StatusCode, header},
-    response::{Html, IntoResponse},
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
 use qrcode::QrCode;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::mpsc};
 use tracing::{info, warn};
@@ -22,7 +29,8 @@ use crate::{
     config::{AppConfig, AppPaths},
     contract::{
         Auth, AuthOk, ChatDelta, ChatDone, ChatHistory, ChatHistoryResult, ChatSend, Envelope,
-        PairChallenge, PairConfirm, PairResult, PairStart, Type,
+        LockChanged, LockRequest, LockState, ObjectOpKind, PairChallenge, PairConfirm, PairResult,
+        PairStart, SyncChanges, SyncPull, SyncPush, SyncPushResult, Type,
     },
     core::llm::LlmClient,
     net::{
@@ -30,7 +38,7 @@ use crate::{
         pairing::{PairingManager, hash_token},
         protocol::{self, error_envelope, new_envelope},
     },
-    store::{Message, Store},
+    store::{LOCK_TTL_MS, Message, Store, UpsertOutcome},
 };
 
 #[derive(Clone)]
@@ -39,6 +47,22 @@ struct AppState {
     store: Arc<Store>,
     pairing: Arc<PairingManager>,
     local_url: String,
+    /// 当前在线设备 -> 出站通道。锁变更需要广播给所有设备，因此必须集中登记。
+    clients: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Envelope>>>>,
+}
+
+/// 把一条消息推给所有在线设备。锁的归属变化需要让每一端立刻刷新只读态。
+fn broadcast(state: &AppState, envelope_type: Type, payload: impl serde::Serialize) {
+    let Ok(envelope) = new_envelope(envelope_type, payload) else {
+        return;
+    };
+    let clients = state
+        .clients
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    for sender in clients.values() {
+        let _ = sender.send(envelope.clone());
+    }
 }
 
 pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
@@ -51,9 +75,11 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
         store,
         pairing,
         local_url: local_url.clone(),
+        clients: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         .route("/health", get(health))
+        .route("/artifacts/{blob_id}", get(artifact))
         .route("/pairing", get(pairing_page))
         .route("/pairing/qr.svg", get(pairing_qr))
         .route("/pairing/status", get(pairing_status))
@@ -132,6 +158,107 @@ async fn pairing_page(
 ) -> Result<Html<&'static str>, StatusCode> {
     require_local(address)?;
     Ok(Html(PAIRING_PAGE))
+}
+
+#[derive(Deserialize)]
+struct ArtifactQuery {
+    device_id: String,
+    token: String,
+    /// 传 1 时返回缩略图，列表页用它避免整图解码。
+    thumb: Option<String>,
+}
+
+/// 产物下载。支持 Range，方便手机端断点续传与边下边显示。
+///
+/// 鉴权走查询参数而不是请求头：React Native 的 <Image> 无法附加自定义头，
+/// 图片必须能直接用 URL 加载。
+async fn artifact(
+    State(state): State<AppState>,
+    Path(blob_id): Path<String>,
+    Query(query): Query<ArtifactQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if state
+        .store
+        .authenticate(&query.device_id, &hash_token(&query.token))
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return (StatusCode::UNAUTHORIZED, "设备未授权").into_response();
+    }
+
+    let blob = match state.store.blob_by_id(&blob_id) {
+        Ok(Some(blob)) => blob,
+        Ok(None) => return (StatusCode::NOT_FOUND, "产物不存在").into_response(),
+        Err(error) => {
+            warn!("读取产物失败：{error:#}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "读取产物失败").into_response();
+        }
+    };
+
+    let want_thumb = query.thumb.as_deref() == Some("1");
+    let (path, mime) = match (&blob.thumb_path, want_thumb) {
+        (Some(thumb), true) => (thumb.clone(), "image/png".to_owned()),
+        _ => (blob.path.clone(), blob.mime.clone()),
+    };
+
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            warn!("读取产物文件失败 {}: {error}", path);
+            return (StatusCode::NOT_FOUND, "产物文件已丢失").into_response();
+        }
+    };
+
+    let total = bytes.len();
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_range(value, total));
+
+    match range {
+        Some((start, end)) => {
+            let slice = bytes[start..=end].to_vec();
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, mime)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::CONTENT_LENGTH, slice.len())
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{total}"),
+                )
+                .body(Body::from(slice))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        None => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CONTENT_LENGTH, total)
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
+}
+
+/// 解析 `bytes=start-end`。只处理单区间，够用且不引入额外依赖。
+fn parse_range(value: &str, total: usize) -> Option<(usize, usize)> {
+    let spec = value.strip_prefix("bytes=")?;
+    if total == 0 {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    let start: usize = start.parse().ok()?;
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<usize>().ok()?
+    };
+    if start > end || end >= total {
+        return None;
+    }
+    Some((start, end))
 }
 
 fn require_local(address: std::net::SocketAddr) -> Result<(), StatusCode> {
@@ -293,7 +420,8 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
             Type::AuthOk,
             AuthOk {
                 device_id: device.id.clone(),
-                device_name: device.name,
+                // 保留一份名字：后续广播锁归属时还要用。
+                device_name: device.name.clone(),
             },
         )
         .unwrap_or_else(|error| error_envelope(error.to_string(), None)),
@@ -306,6 +434,11 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
 
     let (mut socket_sender, mut socket_receiver) = socket.split();
     let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<Envelope>();
+    state
+        .clients
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(device.id.clone(), outbound.clone());
     let writer = tokio::spawn(async move {
         while let Some(envelope) = outbound_rx.recv().await {
             let Ok(text) = serde_json::to_string(&envelope) else {
@@ -394,12 +527,186 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
                     ));
                 }
             },
+            Type::SyncPull => {
+                match protocol::payload::<SyncPull>(&envelope).and_then(|payload| {
+                    let limit = payload.limit.unwrap_or(500).clamp(1, 1000) as usize;
+                    let objects = state.store.objects_since(payload.since_seq, limit)?;
+                    let seq = state.store.max_seq()?;
+                    new_envelope(Type::SyncChanges, SyncChanges { objects, seq })
+                }) {
+                    Ok(response) => {
+                        let _ = outbound.send(response);
+                    }
+                    Err(error) => {
+                        let _ = outbound.send(error_envelope(
+                            format!("拉取同步失败：{error:#}"),
+                            Some(request_id),
+                        ));
+                    }
+                }
+            }
+            Type::SyncPush => {
+                match protocol::payload::<SyncPush>(&envelope).and_then(|payload| {
+                    let mut accepted = 0_i64;
+                    let mut conflicts = Vec::new();
+                    for op in payload.ops {
+                        let outcome = match op.op {
+                            ObjectOpKind::Upsert => state.store.upsert_object(&op.draft)?,
+                            ObjectOpKind::Delete => {
+                                state.store.delete_object(&op.draft.id, op.draft.base_rev)?
+                            }
+                        };
+                        match outcome {
+                            UpsertOutcome::Saved(_) => accepted += 1,
+                            // 冲突一律不覆盖，把服务端版本回传，由客户端另存副本。
+                            UpsertOutcome::Conflict(current) => conflicts.push(current),
+                        }
+                    }
+                    let seq = state.store.max_seq()?;
+                    new_envelope(
+                        Type::SyncPushResult,
+                        SyncPushResult {
+                            accepted,
+                            conflicts,
+                            seq,
+                        },
+                    )
+                }) {
+                    Ok(response) => {
+                        let _ = outbound.send(response);
+                    }
+                    Err(error) => {
+                        let _ = outbound.send(error_envelope(
+                            format!("提交同步失败：{error:#}"),
+                            Some(request_id),
+                        ));
+                    }
+                }
+            }
+            Type::LockAcquire => {
+                match protocol::payload::<LockRequest>(&envelope).and_then(|payload| {
+                    let attempt =
+                        state
+                            .store
+                            .acquire_lock(&payload.object_id, &device.id, LOCK_TTL_MS)?;
+                    if attempt.granted {
+                        broadcast(
+                            &state,
+                            Type::LockChanged,
+                            LockChanged {
+                                object_id: payload.object_id.clone(),
+                                holder_device_name: device.name.clone(),
+                                expires_in_ms: attempt.expires_in_ms,
+                            },
+                        );
+                    }
+                    new_envelope(
+                        Type::LockState,
+                        LockState {
+                            object_id: payload.object_id,
+                            granted: attempt.granted,
+                            holder_device_name: attempt.holder_name,
+                            expires_in_ms: attempt.expires_in_ms,
+                        },
+                    )
+                }) {
+                    Ok(response) => {
+                        let _ = outbound.send(response);
+                    }
+                    Err(error) => {
+                        let _ = outbound.send(error_envelope(
+                            format!("获取编辑锁失败：{error:#}"),
+                            Some(request_id),
+                        ));
+                    }
+                }
+            }
+            Type::LockHeartbeat => {
+                match protocol::payload::<LockRequest>(&envelope).and_then(|payload| {
+                    // 续约失败通常意味着锁已被别人接管，回传真实状态让客户端退回只读。
+                    let attempt =
+                        state
+                            .store
+                            .acquire_lock(&payload.object_id, &device.id, LOCK_TTL_MS)?;
+                    new_envelope(
+                        Type::LockState,
+                        LockState {
+                            object_id: payload.object_id,
+                            granted: attempt.granted,
+                            holder_device_name: attempt.holder_name,
+                            expires_in_ms: attempt.expires_in_ms,
+                        },
+                    )
+                }) {
+                    Ok(response) => {
+                        let _ = outbound.send(response);
+                    }
+                    Err(error) => {
+                        let _ = outbound.send(error_envelope(
+                            format!("续约编辑锁失败：{error:#}"),
+                            Some(request_id),
+                        ));
+                    }
+                }
+            }
+            Type::LockRelease => match protocol::payload::<LockRequest>(&envelope) {
+                Ok(payload) => match state.store.release_lock(&payload.object_id, &device.id) {
+                    Ok(true) => {
+                        broadcast(
+                            &state,
+                            Type::LockChanged,
+                            LockChanged {
+                                object_id: payload.object_id,
+                                holder_device_name: String::new(),
+                                expires_in_ms: 0,
+                            },
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        let _ = outbound.send(error_envelope(
+                            format!("释放编辑锁失败：{error:#}"),
+                            Some(request_id),
+                        ));
+                    }
+                },
+                Err(error) => {
+                    let _ = outbound.send(error_envelope(
+                        format!("消息参数错误：{error}"),
+                        Some(request_id),
+                    ));
+                }
+            },
             _ => {
                 let _ = outbound.send(error_envelope("不支持的消息类型", Some(request_id)));
             }
         }
     }
     writer.abort();
+
+    // 断线清理：先从广播表里摘掉，再释放它持有的编辑锁，
+    // 否则另一端会一直看到"某某正在编辑"，直到锁自然过期。
+    state
+        .clients
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&device.id);
+    match state.store.release_device_locks(&device.id) {
+        Ok(released) => {
+            for object_id in released {
+                broadcast(
+                    &state,
+                    Type::LockChanged,
+                    LockChanged {
+                        object_id,
+                        holder_device_name: String::new(),
+                        expires_in_ms: 0,
+                    },
+                );
+            }
+        }
+        Err(error) => warn!("释放设备编辑锁失败：{error:#}"),
+    }
 }
 
 async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<crate::store::Device> {

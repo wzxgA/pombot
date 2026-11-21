@@ -15,7 +15,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Pom } from '../components/Pom';
-import { ChatConnection, type ChatMessage, type ConnectionStatus } from '../lib/chat';
+import { ChatStore, type ChatMessage, type ConnectionStatus } from '../lib/chat';
+import { getServerConnection, resetServerConnection } from '../lib/connection';
 import { clearPairedDevice, loadPairedDevice } from '../lib/identity';
 
 export default function ChatScreen() {
@@ -24,29 +25,33 @@ export default function ChatScreen() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  const connection = useRef<ChatConnection | null>(null);
+  const store = useRef<ChatStore | null>(null);
   const list = useRef<FlatList<ChatMessage>>(null);
 
   useEffect(() => {
     let active = true;
-    loadPairedDevice().then((device) => {
-      if (!active) return;
-      if (!device) {
-        router.replace('/pair');
-        return;
-      }
-      const client = new ChatConnection(device, {
-        onStatus: setStatus,
-        onMessages: setMessages,
-        onSending: setSending,
-        onError: setError,
-      });
-      connection.current = client;
-      client.connect();
-    }).catch((reason) => setError(String(reason)));
+    let unsubscribe = () => {};
+    loadPairedDevice()
+      .then((device) => {
+        if (!active) return;
+        if (!device) {
+          router.replace('/pair');
+          return;
+        }
+        const connection = getServerConnection(device);
+        store.current = new ChatStore(connection, {
+          onMessages: setMessages,
+          onSending: setSending,
+          onError: setError,
+        });
+        unsubscribe = connection.onStatus(setStatus);
+        connection.connect();
+      })
+      .catch((reason) => setError(String(reason)));
     return () => {
       active = false;
-      connection.current?.dispose();
+      unsubscribe();
+      store.current?.dispose();
     };
   }, []);
 
@@ -54,7 +59,7 @@ export default function ChatScreen() {
     if (!input.trim() || sending) return;
     try {
       setError('');
-      connection.current?.sendMessage(input);
+      store.current?.sendMessage(input);
       setInput('');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -68,7 +73,7 @@ export default function ChatScreen() {
         text: '解除',
         style: 'destructive',
         onPress: () => {
-          connection.current?.dispose();
+          resetServerConnection();
           clearPairedDevice().finally(() => router.replace('/pair'));
         },
       },
@@ -86,7 +91,17 @@ export default function ChatScreen() {
             {connected ? '已连接（局域网）' : status === 'connecting' ? '正在连接电脑…' : '离线，正在重连'}
           </Text>
         </View>
-        <Pressable onPress={unpair} hitSlop={12}><Text style={styles.unpair}>解除配对</Text></Pressable>
+        <View style={styles.headerActions}>
+          <Pressable onPress={() => router.push('/notes')} hitSlop={10}>
+            <Text style={styles.nav}>笔记</Text>
+          </Pressable>
+          <Pressable onPress={() => router.push('/artifacts')} hitSlop={10}>
+            <Text style={styles.nav}>产物</Text>
+          </Pressable>
+          <Pressable onPress={unpair} hitSlop={12}>
+            <Text style={styles.unpair}>解除配对</Text>
+          </Pressable>
+        </View>
       </View>
       {error ? <Pressable style={styles.error} onPress={() => setError('')}><Text style={styles.errorText}>{error}</Text></Pressable> : null}
       <KeyboardAvoidingView style={styles.body} behavior="padding">
@@ -130,6 +145,8 @@ const styles = StyleSheet.create({
   status: { marginTop: 3, fontSize: 13 },
   online: { color: '#547665' },
   offline: { color: '#9a685e' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  nav: { color: '#547665', fontSize: 14, fontWeight: '600' },
   unpair: { color: '#65736c', fontSize: 13 },
   error: { backgroundColor: '#f7e5df', marginHorizontal: 16, padding: 12, borderRadius: 12 },
   errorText: { color: '#834d43', lineHeight: 20 },

@@ -7,6 +7,9 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
+export type ObjectType = "note" | "memo" | "todo" | "artifact";
+export type ObjectOpKind = "upsert" | "delete";
+
 export interface Contract {
   envelope?: Envelope;
   auth?: AuthPayload;
@@ -21,6 +24,17 @@ export interface Contract {
   chatDelta?: ChatDeltaPayload;
   chatDone?: ChatDonePayload;
   error?: ErrorPayload;
+  objectRecord?: ObjectRecord;
+  objectDraft?: ObjectDraft;
+  objectOp?: ObjectOp;
+  artifactInfo?: ArtifactInfo;
+  syncPull?: SyncPullPayload;
+  syncChanges?: SyncChangesPayload;
+  syncPush?: SyncPushPayload;
+  syncPushResult?: SyncPushResultPayload;
+  lockRequest?: LockRequestPayload;
+  lockState?: LockStatePayload;
+  lockChanged?: LockChangedPayload;
   [k: string]: unknown;
 }
 export interface Envelope {
@@ -38,6 +52,15 @@ export interface Envelope {
     | "chat.history.result"
     | "chat.delta"
     | "chat.done"
+    | "sync.pull"
+    | "sync.changes"
+    | "sync.push"
+    | "sync.push.result"
+    | "lock.acquire"
+    | "lock.release"
+    | "lock.heartbeat"
+    | "lock.state"
+    | "lock.changed"
     | "ping"
     | "pong"
     | "error";
@@ -104,4 +127,93 @@ export interface ErrorPayload {
   code?: string;
   message: string;
   request_id?: string;
+}
+export interface ObjectRecord {
+  id: string;
+  type: ObjectType;
+  title: string;
+  content: string;
+  seq: number;
+  rev: number;
+  created_at: number;
+  updated_at: number;
+  /** @author wzxgqtl 2026-11-20
+
+   * 0 表示未删除；非 0 为墓碑，客户端据此移除
+   */
+  deleted_at: number;
+  artifact?: ArtifactInfo;
+}
+export interface ArtifactInfo {
+  blob_id: string;
+  name: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  thumb_blob_id?: string;
+}
+export interface ObjectDraft {
+  /** @author wzxgqtl 2026-11-20
+
+   * 空字符串表示新建，由服务端分配
+   */
+  id: string;
+  type: ObjectType;
+  title: string;
+  content: string;
+  /** @author wzxgqtl 2026-11-20
+
+   * 客户端编辑时持有的版本号；0 表示新建
+   */
+  base_rev: number;
+}
+export interface ObjectOp {
+  op: ObjectOpKind;
+  draft: ObjectDraft;
+}
+export interface SyncPullPayload {
+  since_seq: number;
+  limit?: number;
+}
+export interface SyncChangesPayload {
+  /** @author wzxgqtl 2026-11-20
+
+   * 本次结果对应的最新 seq，客户端应存下来作为下次 since_seq
+   */
+  seq: number;
+  objects: ObjectRecord[];
+}
+export interface SyncPushPayload {
+  ops: ObjectOp[];
+}
+export interface SyncPushResultPayload {
+  seq: number;
+  accepted: number;
+  /** @author wzxgqtl 2026-11-20
+
+   * 提交时 base_rev 已过期的对象，回传服务端当前版本供客户端另存副本
+   */
+  conflicts: ObjectRecord[];
+}
+export interface LockRequestPayload {
+  object_id: string;
+}
+export interface LockStatePayload {
+  object_id: string;
+  granted: boolean;
+  /** @author wzxgqtl 2026-11-20
+
+   * 未持有时为空字符串
+   */
+  holder_device_name: string;
+  expires_in_ms: number;
+}
+export interface LockChangedPayload {
+  object_id: string;
+  /** @author wzxgqtl 2026-11-20
+
+   * 空字符串表示锁已释放
+   */
+  holder_device_name: string;
+  expires_in_ms: number;
 }

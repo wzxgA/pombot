@@ -1,12 +1,15 @@
-import { randomUUID } from 'expo-crypto';
+// @author wzxgqtl 2026-11-21
+// 聊天状态。连接本身由 connection.ts 统一持有，这里只负责消息列表的增量维护。
 
 import type {
   ChatDeltaPayload as ChatDelta,
   ChatDonePayload as ChatDone,
   ChatHistoryResultPayload as ChatHistoryResult,
+  Envelope,
 } from '../generated/contract';
-import type { PairedDevice } from './identity';
-import { createEnvelope, parseEnvelope, websocketUrl } from './protocol';
+import type { ServerConnection } from './connection';
+
+export type { ConnectionStatus } from './connection';
 
 export interface ChatMessage {
   id: string;
@@ -15,147 +18,102 @@ export interface ChatMessage {
   createdAt: number;
 }
 
-export type ConnectionStatus = 'connecting' | 'connected' | 'offline';
-
 interface ChatCallbacks {
-  onStatus: (status: ConnectionStatus) => void;
   onMessages: (messages: ChatMessage[]) => void;
   onSending: (sending: boolean) => void;
   onError: (message: string) => void;
 }
 
-export class ChatConnection {
-  private socket: WebSocket | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private retries = 0;
-  private disposed = false;
-  private connected = false;
+export class ChatStore {
   private messages: ChatMessage[] = [];
+  private readonly unsubscribe: () => void;
+  private readonly unsubscribeStatus: () => void;
+  private historyLoaded = false;
 
   constructor(
-    private readonly device: PairedDevice,
+    private readonly connection: ServerConnection,
     private readonly callbacks: ChatCallbacks,
-  ) {}
+  ) {
+    this.unsubscribe = connection.subscribe((envelope) => this.handle(envelope));
+    this.unsubscribeStatus = connection.onStatus((status) => {
+      if (status === 'connected' && !this.historyLoaded) this.loadHistory();
+      if (status === 'offline') this.callbacks.onSending(false);
+    });
+  }
 
-  connect() {
-    if (this.disposed) return;
-    this.callbacks.onStatus('connecting');
-    const socket = new WebSocket(websocketUrl(this.device.serverUrl));
-    this.socket = socket;
-    socket.onopen = () => {
-      socket.send(JSON.stringify(createEnvelope('auth', {
-        device_id: this.device.deviceId,
-        token: this.device.token,
-      })));
-    };
-    socket.onmessage = (event) => this.handleMessage(socket, event.data);
-    socket.onerror = () => {
-      if (this.socket === socket) this.callbacks.onStatus('offline');
-    };
-    socket.onclose = () => {
-      if (this.socket !== socket || this.disposed) return;
-      this.connected = false;
-      this.callbacks.onStatus('offline');
-      this.callbacks.onSending(false);
-      this.scheduleReconnect();
-    };
+  loadHistory() {
+    if (!this.connection.send('chat.history', { session_id: 'default', limit: 100 })) return;
+    this.historyLoaded = true;
   }
 
   sendMessage(content: string) {
-    if (!this.connected || !this.socket) throw new Error('电脑尚未连接');
     const text = content.trim();
     if (!text) return;
-    const local: ChatMessage = {
-      id: randomUUID(),
-      role: 'user',
-      content: text,
-      createdAt: Date.now(),
-    };
-    this.messages = [...this.messages, local];
+    if (!this.connection.connected) throw new Error('电脑尚未连接');
+    this.messages = [
+      ...this.messages,
+      { id: `local-${Date.now()}`, role: 'user', content: text, createdAt: Date.now() },
+    ];
     this.callbacks.onMessages(this.messages);
     this.callbacks.onSending(true);
-    this.socket.send(JSON.stringify(createEnvelope('chat.send', {
-      session_id: 'default',
-      content: text,
-    })));
+    this.connection.send('chat.send', { session_id: 'default', content: text });
   }
 
   dispose() {
-    this.disposed = true;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.socket?.close();
-    this.socket = null;
+    this.unsubscribe();
+    this.unsubscribeStatus();
   }
 
-  private handleMessage(socket: WebSocket, data: unknown) {
-    if (socket !== this.socket) return;
-    try {
-      const envelope = parseEnvelope(data);
-      switch (envelope.type) {
-        case 'auth.ok':
-          this.connected = true;
-          this.retries = 0;
-          this.callbacks.onStatus('connected');
-          socket.send(JSON.stringify(createEnvelope('chat.history', {
-            session_id: 'default',
-            limit: 100,
-          })));
-          break;
-        case 'chat.history.result': {
-          const payload = envelope.payload as unknown as ChatHistoryResult;
-          this.messages = payload.messages.map((message) => ({
-            id: message.id,
-            role: message.role,
-            content: message.content,
-            createdAt: message.created_at,
-          }));
-          this.callbacks.onMessages(this.messages);
-          break;
-        }
-        case 'chat.delta': {
-          const delta = envelope.payload as unknown as ChatDelta;
-          const existing = this.messages.find((message) => message.id === delta.message_id);
-          if (existing) {
-            existing.content += delta.delta;
-          } else {
-            this.messages.push({
-              id: delta.message_id,
-              role: 'assistant',
-              content: delta.delta,
-              createdAt: envelope.ts,
-            });
-          }
-          this.callbacks.onMessages([...this.messages]);
-          break;
-        }
-        case 'chat.done': {
-          const done = envelope.payload as unknown as ChatDone;
-          const existing = this.messages.find((message) => message.id === done.message_id);
-          if (existing) existing.content = done.content;
-          else this.messages.push({ id: done.message_id, role: 'assistant', content: done.content, createdAt: envelope.ts });
-          this.callbacks.onMessages([...this.messages]);
-          this.callbacks.onSending(false);
-          break;
-        }
-        case 'error': {
-          const payload = envelope.payload as { message?: string };
-          this.callbacks.onError(payload.message ?? '发生未知错误');
-          this.callbacks.onSending(false);
-          break;
-        }
+  private handle(envelope: Envelope) {
+    switch (envelope.type) {
+      case 'chat.history.result': {
+        const payload = envelope.payload as unknown as ChatHistoryResult;
+        this.messages = payload.messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          createdAt: message.created_at,
+        }));
+        this.callbacks.onMessages(this.messages);
+        break;
       }
-    } catch (error) {
-      this.callbacks.onError(error instanceof Error ? error.message : '协议消息无效');
+      case 'chat.delta': {
+        const delta = envelope.payload as unknown as ChatDelta;
+        const existing = this.messages.find((message) => message.id === delta.message_id);
+        if (existing) existing.content += delta.delta;
+        else
+          this.messages.push({
+            id: delta.message_id,
+            role: 'assistant',
+            content: delta.delta,
+            createdAt: envelope.ts,
+          });
+        this.callbacks.onMessages([...this.messages]);
+        break;
+      }
+      case 'chat.done': {
+        const done = envelope.payload as unknown as ChatDone;
+        const existing = this.messages.find((message) => message.id === done.message_id);
+        if (existing) existing.content = done.content;
+        else
+          this.messages.push({
+            id: done.message_id,
+            role: 'assistant',
+            content: done.content,
+            createdAt: envelope.ts,
+          });
+        this.callbacks.onMessages([...this.messages]);
+        this.callbacks.onSending(false);
+        break;
+      }
+      case 'error': {
+        const payload = envelope.payload as { message?: string };
+        this.callbacks.onError(payload.message ?? '发生未知错误');
+        this.callbacks.onSending(false);
+        break;
+      }
+      default:
+        break;
     }
-  }
-
-  private scheduleReconnect() {
-    if (this.reconnectTimer || this.disposed) return;
-    const delay = Math.min(10_000, 1_000 * 2 ** this.retries);
-    this.retries += 1;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, delay);
   }
 }

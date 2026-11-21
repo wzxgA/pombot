@@ -15,7 +15,19 @@
     "chatHistoryResult": { "$ref": "#/$defs/ChatHistoryResultPayload" },
     "chatDelta": { "$ref": "#/$defs/ChatDeltaPayload" },
     "chatDone": { "$ref": "#/$defs/ChatDonePayload" },
-    "error": { "$ref": "#/$defs/ErrorPayload" }
+    "error": { "$ref": "#/$defs/ErrorPayload" },
+
+    "objectRecord": { "$ref": "#/$defs/ObjectRecord" },
+    "objectDraft": { "$ref": "#/$defs/ObjectDraft" },
+    "objectOp": { "$ref": "#/$defs/ObjectOp" },
+    "artifactInfo": { "$ref": "#/$defs/ArtifactInfo" },
+    "syncPull": { "$ref": "#/$defs/SyncPullPayload" },
+    "syncChanges": { "$ref": "#/$defs/SyncChangesPayload" },
+    "syncPush": { "$ref": "#/$defs/SyncPushPayload" },
+    "syncPushResult": { "$ref": "#/$defs/SyncPushResultPayload" },
+    "lockRequest": { "$ref": "#/$defs/LockRequestPayload" },
+    "lockState": { "$ref": "#/$defs/LockStatePayload" },
+    "lockChanged": { "$ref": "#/$defs/LockChangedPayload" }
   },
   "$defs": {
     "Envelope": {
@@ -25,7 +37,7 @@
       "properties": {
         "v": { "type": "integer", "const": 1 },
         "id": { "type": "string", "format": "uuid" },
-        "type": { "type": "string", "enum": ["auth", "auth.ok", "pair.start", "pair.challenge", "pair.confirm", "pair.result", "chat.send", "chat.history", "chat.history.result", "chat.delta", "chat.done", "ping", "pong", "error"] },
+        "type": { "type": "string", "enum": ["auth", "auth.ok", "pair.start", "pair.challenge", "pair.confirm", "pair.result", "chat.send", "chat.history", "chat.history.result", "chat.delta", "chat.done", "sync.pull", "sync.changes", "sync.push", "sync.push.result", "lock.acquire", "lock.release", "lock.heartbeat", "lock.state", "lock.changed", "ping", "pong", "error"] },
         "ts": { "type": "integer", "minimum": 0 },
         "nonce": { "type": "string", "minLength": 8, "maxLength": 128 },
         "payload": true
@@ -153,6 +165,149 @@
         "code": { "type": "string" },
         "message": { "type": "string" },
         "request_id": { "type": "string" }
+      }
+    },
+
+    "ObjectType": {
+      "title": "ObjectType",
+      "type": "string",
+      "enum": ["note", "memo", "todo", "artifact"]
+    },
+
+    "ObjectOpKind": {
+      "title": "ObjectOpKind",
+      "type": "string",
+      "enum": ["upsert", "delete"]
+    },
+
+    "ArtifactInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blob_id", "name", "mime", "size", "sha256"],
+      "properties": {
+        "blob_id": { "type": "string" },
+        "name": { "type": "string" },
+        "mime": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string" },
+        "thumb_blob_id": { "type": "string" }
+      }
+    },
+
+    "ObjectRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "title", "content", "seq", "rev", "created_at", "updated_at", "deleted_at"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "type": { "$ref": "#/$defs/ObjectType" },
+        "title": { "type": "string", "maxLength": 200 },
+        "content": { "type": "string", "maxLength": 200000 },
+        "seq": { "type": "integer", "minimum": 0 },
+        "rev": { "type": "integer", "minimum": 1 },
+        "created_at": { "type": "integer" },
+        "updated_at": { "type": "integer" },
+        "deleted_at": { "type": "integer", "description": "0 表示未删除；非 0 为墓碑，客户端据此移除" },
+        "artifact": { "$ref": "#/$defs/ArtifactInfo" }
+      }
+    },
+
+    "ObjectDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "title", "content", "base_rev"],
+      "properties": {
+        "id": { "type": "string", "description": "空字符串表示新建，由服务端分配" },
+        "type": { "$ref": "#/$defs/ObjectType" },
+        "title": { "type": "string", "maxLength": 200 },
+        "content": { "type": "string", "maxLength": 200000 },
+        "base_rev": { "type": "integer", "minimum": 0, "description": "客户端编辑时持有的版本号；0 表示新建" }
+      }
+    },
+
+    "ObjectOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "draft"],
+      "properties": {
+        "op": { "$ref": "#/$defs/ObjectOpKind" },
+        "draft": { "$ref": "#/$defs/ObjectDraft" }
+      }
+    },
+
+    "SyncPullPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["since_seq"],
+      "properties": {
+        "since_seq": { "type": "integer", "minimum": 0, "default": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 500 }
+      }
+    },
+
+    "SyncChangesPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "objects"],
+      "properties": {
+        "seq": { "type": "integer", "description": "本次结果对应的最新 seq，客户端应存下来作为下次 since_seq" },
+        "objects": { "type": "array", "items": { "$ref": "#/$defs/ObjectRecord" } }
+      }
+    },
+
+    "SyncPushPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ops"],
+      "properties": {
+        "ops": { "type": "array", "items": { "$ref": "#/$defs/ObjectOp" } }
+      }
+    },
+
+    "SyncPushResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "accepted", "conflicts"],
+      "properties": {
+        "seq": { "type": "integer" },
+        "accepted": { "type": "integer" },
+        "conflicts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ObjectRecord" },
+          "description": "提交时 base_rev 已过期的对象，回传服务端当前版本供客户端另存副本"
+        }
+      }
+    },
+
+    "LockRequestPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id"],
+      "properties": {
+        "object_id": { "type": "string" }
+      }
+    },
+
+    "LockStatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "granted", "holder_device_name", "expires_in_ms"],
+      "properties": {
+        "object_id": { "type": "string" },
+        "granted": { "type": "boolean" },
+        "holder_device_name": { "type": "string", "description": "未持有时为空字符串" },
+        "expires_in_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "LockChangedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "holder_device_name", "expires_in_ms"],
+      "properties": {
+        "object_id": { "type": "string" },
+        "holder_device_name": { "type": "string", "description": "空字符串表示锁已释放" },
+        "expires_in_ms": { "type": "integer", "minimum": 0 }
       }
     }
   }
