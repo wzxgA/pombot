@@ -51,6 +51,8 @@ struct AppState {
     store: Arc<Store>,
     pairing: Arc<PairingManager>,
     local_url: String,
+    /// 公网地址（如 `https://pom.example.com`），未配置时为 `None`。
+    public_url: Option<String>,
     /// 工具产出文件与产物实体都落在这下面。
     data_dir: std::path::PathBuf,
     /// 当前在线设备 -> 出站通道。锁变更需要广播给所有设备，因此必须集中登记。
@@ -81,7 +83,18 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
     let pairing = Arc::new(PairingManager::new(store.signing_key()?));
     let ip = local_ip().unwrap_or_else(|| "127.0.0.1".to_owned());
     let local_url = format!("http://{ip}:{}", config.server.port);
+    // 去掉尾部斜杠与空白，避免拼出来的 URL 出现双斜杠。
+    let public_url = config
+        .server
+        .public_url
+        .as_deref()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(url) = &public_url {
+        info!("已配置公网地址：{url}");
+    }
     let state = AppState {
+        public_url: public_url.clone(),
         config: config.clone(),
         store,
         pairing,
@@ -154,10 +167,17 @@ async fn pairing_qr(
     require_local(address, &headers)?;
     let view = state.pairing.view();
     let mut url = Url::parse("pombot://pair").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    url.query_pairs_mut()
-        .append_pair("url", &state.local_url)
-        .append_pair("code", &view.code)
-        .append_pair("pubkey", &view.public_key);
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("url", &state.local_url)
+            .append_pair("code", &view.code)
+            .append_pair("pubkey", &view.public_key);
+        // 公网地址作为备选下发：手机端在内网探测失败时改用它。
+        if let Some(public) = &state.public_url {
+            pairs.append_pair("alt", public);
+        }
+    }
     let code = QrCode::new(url.as_str()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let svg = code
         .render::<qrcode::render::svg::Color>()

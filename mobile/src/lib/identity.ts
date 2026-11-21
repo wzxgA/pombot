@@ -7,6 +7,8 @@ const STORAGE_KEY = 'pombot.device.v1';
 
 export interface PairTicket {
   serverUrl: string;
+  /** 公网地址（可选）。配对时电脑若配置了反向代理，会一并下发。 */
+  alt?: string;
   code: string;
   serverPublicKey: string;
 }
@@ -18,6 +20,8 @@ export interface PairedDevice {
   publicKey: string;
   serverPublicKey: string;
   serverUrl: string;
+  /** 候选地址，按优先级排列：局域网在前，公网在后。 */
+  candidates?: string[];
 }
 
 export function encodeBase64Url(bytes: Uint8Array): string {
@@ -69,7 +73,13 @@ export function parsePairTicket(data: string): PairTicket {
   if (!/^\d{6}$/.test(code) || !serverPublicKey) {
     throw new Error('二维码缺少配对码或公钥，请刷新后重试');
   }
-  return { serverUrl: serverUrl.replace(/\/$/, ''), code, serverPublicKey };
+  const alt = url.searchParams.get('alt') ?? undefined;
+  return {
+    serverUrl: serverUrl.replace(/\/$/, ''),
+    alt: alt ? alt.replace(/\/$/, '') : undefined,
+    code,
+    serverPublicKey,
+  };
 }
 
 export async function loadPairedDevice(): Promise<PairedDevice | null> {
@@ -106,6 +116,7 @@ export async function createIdentity(ticket: PairTicket) {
       publicKey: encodeBase64Url(keyPair.publicKey),
       serverPublicKey: ticket.serverPublicKey,
       serverUrl: ticket.serverUrl,
+      candidates: ticket.alt ? [ticket.serverUrl, ticket.alt] : [ticket.serverUrl],
     } satisfies PairedDevice,
   };
 }

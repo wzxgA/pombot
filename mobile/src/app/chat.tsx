@@ -36,6 +36,7 @@ export default function ChatScreen() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [network, setNetwork] = useState<'lan' | 'public' | null>(null);
   const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
   const store = useRef<ChatStore | null>(null);
   const connection = useRef<ServerConnection | null>(null);
@@ -70,7 +71,11 @@ export default function ChatScreen() {
             expiresIn: payload.expires_in_ms,
           });
         });
-        unsubscribe = client.onStatus(setStatus);
+        // 连接方式只能在回到状态回调里读：ref 在渲染期间不可访问。
+        unsubscribe = client.onStatus((next) => {
+          setStatus(next);
+          setNetwork(client.network);
+        });
         client.connect();
       })
       .catch((reason) => setError(String(reason)));
@@ -129,7 +134,13 @@ export default function ChatScreen() {
         <View>
           <Text style={styles.title}>PomBot</Text>
           <Text style={[styles.status, connected ? styles.online : styles.offline]}>
-            {connected ? '已连接（局域网）' : status === 'connecting' ? '正在连接电脑…' : '离线，正在重连'}
+            {connected
+              ? network === 'public'
+                ? '已连接（外网）'
+                : '已连接（局域网）'
+              : status === 'connecting'
+                ? '正在连接电脑…'
+                : '离线，正在重连'}
           </Text>
         </View>
         <View style={styles.headerActions}>

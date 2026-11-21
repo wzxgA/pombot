@@ -29,6 +29,7 @@ async fn phone_pairs_authenticates_and_receives_streamed_answer() {
         server: ServerConfig {
             host: "127.0.0.1".to_owned(),
             port,
+            public_url: None,
         },
         llm: LlmConfig {
             default: LlmProfile {

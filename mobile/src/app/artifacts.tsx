@@ -81,9 +81,10 @@ export default function ArtifactsScreen() {
           </Text>
         }
         renderItem={({ item }) => {
-          const thumb = device && item.artifact
-            ? artifactUrl(device, item.artifact.blobId, true)
-            : null;
+          const thumb =
+            device && item.artifact
+              ? artifactUrl(getServerConnection(device).baseUrl, device, item.artifact.blobId, true)
+              : null;
           const isImage = item.artifact?.mime.startsWith('image/');
           return (
             <Pressable style={styles.card} onPress={() => router.push(`/artifact?id=${item.id}`)}>

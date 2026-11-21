@@ -23,6 +23,8 @@ import { loadPairedDevice, type PairedDevice } from '../lib/identity';
 import { NotesStore, artifactUrl, type ObjectItem } from '../lib/notes';
 
 const MAX_INLINE_BYTES = 512 * 1024;
+/** Cloudflare 免费版对单个响应体的上限，超过会直接失败。 */
+const LARGE_FILE_BYTES = 100 * 1024 * 1024;
 
 export default function ArtifactScreen() {
   const params = useLocalSearchParams<{ id?: string }>();
@@ -80,7 +82,7 @@ export default function ArtifactScreen() {
   useEffect(() => {
     if (!device || !blobId || !isText || tooLarge) return;
     let active = true;
-    fetch(artifactUrl(device, blobId))
+    fetch(artifactUrl(getServerConnection(device).baseUrl, device, blobId))
       .then((response) => (response.ok ? response.text() : Promise.reject(new Error('下载失败'))))
       .then((value) => {
         if (active) setText(value);
@@ -98,7 +100,9 @@ export default function ArtifactScreen() {
 
   const openExternally = () => {
     if (!device || !item?.artifact) return;
-    Linking.openURL(artifactUrl(device, item.artifact.blobId)).catch(() =>
+    Linking.openURL(
+      artifactUrl(getServerConnection(device).baseUrl, device, item.artifact.blobId),
+    ).catch(() =>
       setError('没有可以打开这个文件的应用'),
     );
   };
@@ -123,6 +127,12 @@ export default function ArtifactScreen() {
         </Text>
       ) : null}
 
+      {item?.artifact && item.artifact.size > LARGE_FILE_BYTES ? (
+        <Text style={styles.warn}>
+          超过 100 MB，经公网隧道可能下载失败，建议在同一 WiFi 下打开
+        </Text>
+      ) : null}
+
       {error ? (
         <Pressable style={styles.error} onPress={() => setError('')}>
           <Text style={styles.errorText}>{error}</Text>
@@ -135,7 +145,7 @@ export default function ArtifactScreen() {
 
       {isImage && device && blobId ? (
         <Image
-          source={{ uri: artifactUrl(device, blobId) }}
+          source={{ uri: artifactUrl(getServerConnection(device).baseUrl, device, blobId) }}
           style={styles.image}
           resizeMode="contain"
         />
@@ -182,6 +192,13 @@ const styles = StyleSheet.create({
   title: { flex: 1, color: '#23362f', fontSize: 16, fontWeight: '700' },
   open: { color: '#547665', fontSize: 14, fontWeight: '700' },
   meta: { color: '#87918b', fontSize: 12, paddingHorizontal: 20, paddingBottom: 10 },
+  warn: {
+    color: '#8a5b4a',
+    fontSize: 12,
+    lineHeight: 18,
+    paddingHorizontal: 20,
+    paddingBottom: 10,
+  },
   error: { backgroundColor: '#f7e5df', marginHorizontal: 16, padding: 12, borderRadius: 12 },
   errorText: { color: '#834d43', lineHeight: 20 },
   spinner: { marginTop: 24 },

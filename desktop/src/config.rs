@@ -15,6 +15,11 @@ pub struct AppConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// 公网访问地址，例如 `https://pom.example.com`。
+    ///
+    /// 经 Cloudflare Tunnel 之类反向代理暴露时填写，配对二维码会把它一并下发，
+    /// 手机端据此在离开局域网后改用公网地址。留空则只支持局域网。
+    pub public_url: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -22,6 +27,7 @@ impl Default for ServerConfig {
         Self {
             host: "0.0.0.0".to_owned(),
             port: 8765,
+            public_url: None,
         }
     }
 }

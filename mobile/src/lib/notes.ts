@@ -236,12 +236,22 @@ export class NotesStore {
   }
 }
 
-/** 产物下载地址。鉴权走查询参数，因为 <Image> 无法附加请求头。 */
-export function artifactUrl(device: PairedDevice, blobId: string, thumb = false): string {
+/**
+ * 产物下载地址。鉴权走查询参数，因为 <Image> 无法附加请求头。
+ *
+ * `baseUrl` 由连接层提供而不是直接取 `device.serverUrl`：
+ * 手机可能正在用公网地址，写死内网地址会导致图片加载失败。
+ */
+export function artifactUrl(
+  baseUrl: string,
+  device: PairedDevice,
+  blobId: string,
+  thumb = false,
+): string {
   const query = new URLSearchParams({
     device_id: device.deviceId,
     token: device.token,
     ...(thumb ? { thumb: '1' } : {}),
   });
-  return `${device.serverUrl.replace(/\/$/, '')}/artifacts/${blobId}?${query.toString()}`;
+  return `${baseUrl.replace(/\/$/, '')}/artifacts/${blobId}?${query.toString()}`;
 }
