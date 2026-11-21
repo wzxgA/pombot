@@ -97,6 +97,11 @@ fn run() -> Result<()> {
     let config = AppConfig::load(&paths)?;
     let port = config.server.port;
 
+    // 审计日志：写入失败不影响主流程，只是没有记录。
+    if pombot::core::audit::init(&paths.data_dir) {
+        pombot::core::audit::record("app.started", &[("port", serde_json::json!(port))]);
+    }
+
     // 高风险操作的本地否决窗口。手机不在手边时，用户至少还能在电脑上拦住它。
     gui::confirm::start();
 
@@ -112,6 +117,10 @@ fn run() -> Result<()> {
                     "隧道已启动 pid={} 日志={}",
                     guard.pid(),
                     guard.log_path.display()
+                );
+                pombot::core::audit::record(
+                    "tunnel.started",
+                    &[("pid", serde_json::json!(guard.pid()))],
                 );
                 tunnel = Some(guard);
             }

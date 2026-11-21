@@ -2,6 +2,7 @@
 // 核心业务模块。
 
 pub mod artifacts;
+pub mod audit;
 pub mod llm;
 pub mod tools;
 pub mod tunnel;

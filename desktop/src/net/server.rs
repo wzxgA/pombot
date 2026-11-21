@@ -406,6 +406,10 @@ async fn handle_pairing(mut socket: WebSocket, state: AppState) {
                                 active_pair = None;
                                 // 让配对页立刻显示"已配对"，否则用户配对完看不出任何变化。
                                 state.pairing.mark_paired(&pair.device_name);
+                                crate::core::audit::record(
+                                    "pair.confirmed",
+                                    &[("device", serde_json::json!(pair.device_name))],
+                                );
                                 new_envelope(
                                     Type::PairResult,
                                     PairResult {
@@ -783,9 +787,30 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
 }
 
 fn run_tool(state: &AppState, name: &str, arguments: &str) -> String {
+    use crate::core::audit;
     match crate::core::tools::execute(name, arguments, &state.store, &state.data_dir) {
-        Ok(text) => text,
-        Err(error) => format!("工具执行失败：{error:#}"),
+        Ok(text) => {
+            audit::record(
+                "tool.executed",
+                &[
+                    ("tool", serde_json::json!(name)),
+                    ("risk", serde_json::json!("low")),
+                    // 只记长度，不记内容：审计不该成为第二个泄露面。
+                    ("output_chars", serde_json::json!(text.chars().count())),
+                ],
+            );
+            text
+        }
+        Err(error) => {
+            audit::record(
+                "tool.failed",
+                &[
+                    ("tool", serde_json::json!(name)),
+                    ("error", serde_json::json!(format!("{error:#}"))),
+                ],
+            );
+            format!("工具执行失败：{error:#}")
+        }
     }
 }
 
