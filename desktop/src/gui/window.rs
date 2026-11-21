@@ -3,9 +3,10 @@
 // 不触碰控件树 —— 项目采用纯视觉路线，控件语义一律不引入。
 
 use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, SW_RESTORE,
-    SetForegroundWindow, ShowWindow,
+    EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 use windows::core::BOOL;
 
@@ -65,4 +66,45 @@ pub fn focus(hwnd: HWND) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 当前前台窗口。
+// @author wzxgqtl 2026-11-22
+pub fn foreground() -> Option<HWND> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() { None } else { Some(hwnd) }
+}
+
+/// 置前并**校验**是否真的成功。
+///
+/// `SetForegroundWindow` 有个著名的前台锁：非前台进程调用时可能返回成功但窗口并未激活。
+/// 因此不能信任返回值，必须比对 `GetForegroundWindow`。
+/// 失败时用 `AttachThreadInput` 把本线程的输入队列临时挂到目标线程，再试一次。
+// @author wzxgqtl 2026-11-22
+pub fn focus_verified(hwnd: HWND) -> Result<(), String> {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        if foreground() == Some(hwnd) {
+            return Ok(());
+        }
+
+        let _ = SetForegroundWindow(hwnd);
+        if foreground() == Some(hwnd) {
+            return Ok(());
+        }
+
+        let target_thread = GetWindowThreadProcessId(hwnd, None);
+        let current_thread = GetCurrentThreadId();
+        let attached = AttachThreadInput(current_thread, target_thread, true).as_bool();
+        let _ = SetForegroundWindow(hwnd);
+        if attached {
+            let _ = AttachThreadInput(current_thread, target_thread, false);
+        }
+
+        if foreground() == Some(hwnd) {
+            Ok(())
+        } else {
+            Err("前台锁：AttachThreadInput 兜底仍未激活窗口".into())
+        }
+    }
 }
