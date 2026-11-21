@@ -1,0 +1,8 @@
+# @author wzxgqtl 2026-11-20
+# 默认位置：%APPDATA%\PomBot\config.toml
+[server]
+host = "0.0.0.0"
+port = 8765
+
+[llm]
+default = { base_url = "https://api.openai.com/v1", api_key = "替换为你的密钥", model = "gpt-4o-mini" }

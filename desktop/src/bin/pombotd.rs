@@ -1,110 +1,157 @@
-// @author wzxgqtl 2026-11-20
-// PC 端常驻进程（骨架版）。
-//
-// 之所以做成托盘进程而不是 Windows 服务：服务运行在 Session 0，没有桌面，
-// 截图与键鼠注入全部失效。GUI 自动化必须在用户会话内进行。
-//
-// 本文件当前只验证两件事：托盘图标能否显示、全局热键能否触发。
+use std::{
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
-use std::time::{Duration, Instant};
-
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
-use tray_icon::menu::{Menu, MenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
-
+use anyhow::{Context, Result};
+use global_hotkey::{
+    GlobalHotKeyEvent, GlobalHotKeyManager,
+    hotkey::{Code, HotKey, Modifiers},
+};
+use tokio::sync::mpsc;
+use tray_icon::{
+    Icon, TrayIconBuilder,
+    menu::{Menu, MenuItem},
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
 };
 
-/// 生成一个纯代码绘制的圆形图标，避免引入图片资源。
-/// 边缘做简单抗锯齿，缩到 16px 时不至于变成锯齿方块。
-// @author wzxgqtl 2026-11-20
-fn make_icon(size: u32) -> Icon {
+use pombot::{
+    config::{AppConfig, AppPaths},
+    gui,
+    net::server,
+};
+
+fn make_icon(size: u32) -> Result<Icon> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
-    let c = (size as f32 - 1.0) / 2.0;
-    let r = c;
+    let center = (size as f32 - 1.0) / 2.0;
     for y in 0..size {
         for x in 0..size {
-            let dx = x as f32 - c;
-            let dy = y as f32 - c;
-            let d = (dx * dx + dy * dy).sqrt();
-            let alpha = ((r - d).clamp(0.0, 1.0) * 255.0) as u8;
-            let i = ((y * size + x) * 4) as usize;
-            // 深橄榄绿 -> 纸感米白的柔和渐变
-            let t = (d / r).clamp(0.0, 1.0);
-            rgba[i] = (52.0 + (245.0 - 52.0) * t * 0.35) as u8;
-            rgba[i + 1] = (78.0 + (241.0 - 78.0) * t * 0.35) as u8;
-            rgba[i + 2] = (65.0 + (232.0 - 65.0) * t * 0.35) as u8;
-            rgba[i + 3] = alpha;
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let alpha = ((center - distance).clamp(0.0, 1.0) * 255.0) as u8;
+            let index = ((y * size + x) * 4) as usize;
+            let t = (distance / center).clamp(0.0, 1.0);
+            rgba[index] = (52.0 + 193.0 * t * 0.35) as u8;
+            rgba[index + 1] = (78.0 + 163.0 * t * 0.35) as u8;
+            rgba[index + 2] = (65.0 + 167.0 * t * 0.35) as u8;
+            rgba[index + 3] = alpha;
         }
     }
-    Icon::from_rgba(rgba, size, size).expect("构造图标失败")
+    Icon::from_rgba(rgba, size, size).context("构造托盘图标失败")
 }
 
-// @author wzxgqtl 2026-11-20
 fn main() {
-    let start = Instant::now();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "pombot=info".into()),
+        )
+        .init();
+    if let Err(error) = run() {
+        eprintln!("PomBot 启动失败：{error:#}");
+    }
+}
 
-    // 托盘与热键在 Windows 上都依赖消息循环，而且必须与创建它们的线程是同一个。
-    let manager = GlobalHotKeyManager::new().expect("创建热键管理器失败");
+fn run() -> Result<()> {
+    gui::init_dpi_awareness();
+    let paths = AppPaths::discover()?;
+    let config = AppConfig::load(&paths)?;
+    let port = config.server.port;
+    let (quit_tx, mut quit_rx) = mpsc::unbounded_channel();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let tray_stopping = Arc::clone(&stopping);
+    let tray = thread::Builder::new()
+        .name("pombot-tray".to_owned())
+        .spawn(move || run_tray(port, quit_tx, tray_stopping))
+        .context("创建托盘线程失败")?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("创建异步运行时失败")?;
+    let result = runtime.block_on(async move {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            open_pairing_page(port);
+        });
+        let server = server::serve(config, paths);
+        tokio::pin!(server);
+        tokio::select! {
+            result = &mut server => result,
+            _ = quit_rx.recv() => Ok(()),
+        }
+    });
+    stopping.store(true, Ordering::Release);
+    let _ = tray.join();
+    result
+}
+
+fn run_tray(port: u16, quit: mpsc::UnboundedSender<()>, stopping: Arc<AtomicBool>) {
+    if let Err(error) = tray_loop(port, &stopping) {
+        eprintln!("托盘运行失败：{error:#}");
+    }
+    let _ = quit.send(());
+}
+
+fn tray_loop(port: u16, stopping: &AtomicBool) -> Result<()> {
+    // @author wzxgqtl 2026-11-20
+    // 托盘与热键必须在创建它们的同一线程中泵送 Windows 消息。
+    let manager = GlobalHotKeyManager::new().context("创建热键管理器失败")?;
     let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
-    manager.register(hotkey).expect("注册 Alt+Space 失败");
+    manager.register(hotkey).context("注册 Alt+Space 失败")?;
 
     let menu = Menu::new();
-    let show_item = MenuItem::new("PomBot（点击触发）", true, None);
+    let show_item = MenuItem::new("打开配对页面", true, None);
     let quit_item = MenuItem::new("退出", true, None);
-    let _ = menu.append(&show_item);
-    let _ = menu.append(&MenuItem::new("", false, None));
-    let _ = menu.append(&quit_item);
-
+    menu.append(&show_item)?;
+    menu.append(&quit_item)?;
     let _tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("PomBot — M0 骨架")
-        .with_icon(make_icon(32))
+        .with_tooltip("PomBot — 局域网对话")
+        .with_icon(make_icon(32)?)
         .build()
-        .expect("创建托盘图标失败");
+        .context("创建托盘图标失败")?;
 
-    pombot::gui::init_dpi_awareness();
-    println!("[boot] 初始化完成，耗时 {} ms", start.elapsed().as_millis());
-    println!("[boot] 托盘已创建，按 Alt+Space 触发测试，右键托盘可退出");
-
-    let mut msg = MSG::default();
-    let mut ticks: u64 = 0;
-    loop {
-        // 用 PeekMessage 而不是 GetMessage：需要在同一线程里既泵消息又轮询事件通道。
+    let mut message = MSG::default();
+    while !stopping.load(Ordering::Acquire) {
         unsafe {
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
             }
         }
-
-        if let Ok(e) = GlobalHotKeyEvent::receiver().try_recv()
-            && e.state == global_hotkey::HotKeyState::Pressed
+        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv()
+            && event.state == global_hotkey::HotKeyState::Pressed
         {
-            println!("[hotkey] Alt+Space 触发（id={}）", e.id);
+            open_pairing_page(port);
         }
-
-        if let Ok(e) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            if e.id == quit_item.id() {
-                println!("[exit] 菜单退出");
+        if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+            if event.id == quit_item.id() {
                 break;
             }
-            if e.id == show_item.id() {
-                println!("[menu] 点击了主菜单项");
+            if event.id == show_item.id() {
+                open_pairing_page(port);
             }
         }
+        thread::sleep(Duration::from_millis(16));
+    }
+    Ok(())
+}
 
-        for ev in tray_icon::TrayIconEvent::receiver().try_iter() {
-            println!("[tray] 事件: {ev:?}");
-        }
-
-        ticks += 1;
-        if ticks.is_multiple_of(300) {
-            println!("[alive] 已运行 {} s", ticks / 60);
-        }
-
-        std::thread::sleep(Duration::from_millis(16));
+fn open_pairing_page(port: u16) {
+    let url = format!("http://127.0.0.1:{port}/pairing");
+    if let Err(error) = Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn()
+    {
+        eprintln!("无法打开浏览器，请手动访问 {url}：{error}");
     }
 }

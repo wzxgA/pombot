@@ -6,9 +6,29 @@ description = "PomBot —— 私人 AI 助手，手机遥控，电脑执行"
 license = "MIT"
 
 [dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+dotenvy = "0.15"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+futures-util = "0.3"
 global-hotkey = "0.10.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+mdns-sd = "0.22"
+qrcode = { version = "0.14", default-features = false }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.48", features = ["full"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.26.1"
+url = "2.5"
+uuid = { version = "1.18", features = ["v4", "serde"] }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -43,3 +63,6 @@ strip = "symbols"
 
 [build-dependencies]
 embed-resource = "3.0.12"
+
+[dev-dependencies]
+tokio-tungstenite = "0.28"
