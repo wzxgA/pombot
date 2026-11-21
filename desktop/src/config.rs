@@ -8,6 +8,33 @@ use serde::{Deserialize, Serialize};
 pub struct AppConfig {
     pub server: ServerConfig,
     pub llm: LlmConfig,
+    pub cloudflare: CloudflareConfig,
+}
+
+/// 隧道进程的启动方式。
+///
+/// 由主进程拉起的意义是把生命周期绑在一起：用户只需要启动一个程序，
+/// 退出时隧道也跟着结束，不会留下一个还在连着公网的孤儿进程。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloudflareConfig {
+    /// 是否随主进程启动隧道。关掉它就得自己手动 `cloudflared tunnel run`。
+    pub auto_start: bool,
+    /// 隧道名称，对应 `cloudflared tunnel create` 时起的名字。
+    pub tunnel: String,
+    /// `cloudflared` 可执行文件路径。留空则按默认安装位置探测，再退到 PATH。
+    pub binary: String,
+}
+
+impl Default for CloudflareConfig {
+    fn default() -> Self {
+        Self {
+            // 只在配置了 public_url 时才真正尝试启动，避免没装隧道的用户每次启动都看到告警。
+            auto_start: true,
+            tunnel: String::new(),
+            binary: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -31,6 +31,7 @@ async fn phone_pairs_authenticates_and_receives_streamed_answer() {
             port,
             public_url: None,
         },
+        cloudflare: Default::default(),
         llm: LlmConfig {
             default: LlmProfile {
                 base_url: format!("http://{mock_address}/v1"),

@@ -4,3 +4,4 @@
 pub mod artifacts;
 pub mod llm;
 pub mod tools;
+pub mod tunnel;

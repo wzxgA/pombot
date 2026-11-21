@@ -100,6 +100,29 @@ fn run() -> Result<()> {
     // 高风险操作的本地否决窗口。手机不在手边时，用户至少还能在电脑上拦住它。
     gui::confirm::start();
 
+    // 隧道随主进程启动：用户只需要打开一个程序，退出时也不会留下孤儿进程。
+    // 子进程挂在 Job Object 上，主进程被强杀时由系统连带回收（见 core::tunnel）。
+    let mut tunnel = None;
+    if args.iter().any(|arg| arg == "--no-tunnel") {
+        eprintln!("已按 --no-tunnel 跳过隧道启动");
+    } else if config.server.public_url.is_some() && config.cloudflare.auto_start {
+        match pombot::core::tunnel::start(&config.cloudflare, &paths.data_dir) {
+            Ok(guard) => {
+                eprintln!(
+                    "隧道已启动 pid={} 日志={}",
+                    guard.pid(),
+                    guard.log_path.display()
+                );
+                tunnel = Some(guard);
+            }
+            Err(error) => {
+                eprintln!("隧道未能启动：{error:#}\n公网地址将不可用——手机离开局域网后会连不上。")
+            }
+        }
+    } else if config.server.public_url.is_some() {
+        eprintln!("已配置 public_url 但 cloudflare.auto_start 为 false，隧道需要手动启动");
+    }
+
     let (quit_tx, mut quit_rx) = mpsc::unbounded_channel();
     let stopping = Arc::new(AtomicBool::new(false));
     let tray_stopping = Arc::clone(&stopping);
@@ -126,6 +149,10 @@ fn run() -> Result<()> {
     });
     stopping.store(true, Ordering::Release);
     let _ = tray.join();
+    if let Some(guard) = tunnel.as_mut() {
+        guard.stop();
+        eprintln!("隧道已停止");
+    }
     result
 }
 
