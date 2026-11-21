@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Contract",
+  "type": "object",
+  "properties": {
+    "envelope": { "$ref": "#/$defs/Envelope" },
+    "auth": { "$ref": "#/$defs/AuthPayload" },
+    "authOk": { "$ref": "#/$defs/AuthOkPayload" },
+    "pairStart": { "$ref": "#/$defs/PairStartPayload" },
+    "pairChallenge": { "$ref": "#/$defs/PairChallengePayload" },
+    "pairConfirm": { "$ref": "#/$defs/PairConfirmPayload" },
+    "pairResult": { "$ref": "#/$defs/PairResultPayload" },
+    "chatSend": { "$ref": "#/$defs/ChatSendPayload" },
+    "chatHistory": { "$ref": "#/$defs/ChatHistoryPayload" },
+    "chatHistoryResult": { "$ref": "#/$defs/ChatHistoryResultPayload" },
+    "chatDelta": { "$ref": "#/$defs/ChatDeltaPayload" },
+    "chatDone": { "$ref": "#/$defs/ChatDonePayload" },
+    "error": { "$ref": "#/$defs/ErrorPayload" }
+  },
+  "$defs": {
+    "Envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "ts", "nonce", "payload"],
+      "properties": {
+        "v": { "type": "integer", "const": 1 },
+        "id": { "type": "string", "format": "uuid" },
+        "type": { "type": "string", "enum": ["auth", "auth.ok", "pair.start", "pair.challenge", "pair.confirm", "pair.result", "chat.send", "chat.history", "chat.history.result", "chat.delta", "chat.done", "ping", "pong", "error"] },
+        "ts": { "type": "integer", "minimum": 0 },
+        "nonce": { "type": "string", "minLength": 8, "maxLength": 128 },
+        "payload": true
+      }
+    },
+    "AuthPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_id", "token"],
+      "properties": {
+        "device_id": { "type": "string", "format": "uuid" },
+        "token": { "type": "string", "minLength": 32 }
+      }
+    },
+    "AuthOkPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_id", "device_name"],
+      "properties": {
+        "device_id": { "type": "string" },
+        "device_name": { "type": "string" }
+      }
+    },
+    "PairStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "device_id", "device_name", "public_key"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[0-9]{6}$" },
+        "device_id": { "type": "string", "format": "uuid" },
+        "device_name": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "public_key": { "type": "string", "minLength": 32 }
+      }
+    },
+    "PairChallengePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pair_id", "server_public_key", "short_word"],
+      "properties": {
+        "pair_id": { "type": "string", "format": "uuid" },
+        "server_public_key": { "type": "string" },
+        "short_word": { "type": "string" }
+      }
+    },
+    "PairConfirmPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pair_id"],
+      "properties": {
+        "pair_id": { "type": "string", "format": "uuid" }
+      }
+    },
+    "PairResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_id", "token"],
+      "properties": {
+        "device_id": { "type": "string", "format": "uuid" },
+        "token": { "type": "string" }
+      }
+    },
+    "ChatSendPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content"],
+      "properties": {
+        "session_id": { "type": "string", "default": "default" },
+        "content": { "type": "string", "minLength": 1, "maxLength": 32000 }
+      }
+    },
+    "ChatHistoryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string", "default": "default" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100 }
+      }
+    },
+    "ChatHistoryResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "messages"],
+      "properties": {
+        "session_id": { "type": "string" },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/Message" } }
+      }
+    },
+    "Message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "session_id", "role", "content", "created_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "assistant", "system"] },
+        "content": { "type": "string" },
+        "created_at": { "type": "integer" }
+      }
+    },
+    "ChatDeltaPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "message_id", "delta"],
+      "properties": {
+        "session_id": { "type": "string" },
+        "message_id": { "type": "string" },
+        "delta": { "type": "string" }
+      }
+    },
+    "ChatDonePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "message_id", "content"],
+      "properties": {
+        "session_id": { "type": "string" },
+        "message_id": { "type": "string" },
+        "content": { "type": "string" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "request_id": { "type": "string" }
+      }
+    }
+  }
+}
