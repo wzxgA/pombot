@@ -106,6 +106,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/artifacts/{blob_id}", get(artifact))
+        .route("/test", get(test_page))
         .route("/pairing", get(pairing_page))
         .route("/pairing/qr.svg", get(pairing_qr))
         .route("/pairing/status", get(pairing_status))
@@ -146,6 +147,94 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
 
 async fn health() -> Json<Value> {
     Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")}))
+}
+
+/// 测试页参数。用查询参数控制"制造哪种异常"，避免为每个场景写一个文件。
+#[derive(Deserialize, Default)]
+struct TestPageQuery {
+    /// 按钮点下去后延迟多少毫秒才出现结果，用来验证条件等待。
+    delay: Option<u64>,
+    /// 传 1 时隐藏目标按钮，用来验证"找不到就报错"而不是继续往前走。
+    hidden: Option<String>,
+    /// 传 1 时页面加载即弹 alert，用来验证遮挡检测。
+    alert: Option<String>,
+    /// 传 1 时追加超高内容，用来验证滚动。
+    tall: Option<String>,
+}
+
+/// 供 GUI 自动化演练的本地页面。
+///
+/// 为什么不拿真实网站当基线：真实网站无法制造"延迟 3 秒""按钮消失""弹窗遮挡"
+/// 这些情况，而它们恰好是自动化最容易出问题的地方。自己写一页才有可控性。
+async fn test_page(
+    axum::extract::ConnectInfo(address): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<TestPageQuery>,
+) -> Result<Html<String>, StatusCode> {
+    // 只在本机可访问：这页面的用途是调试，不该暴露到公网。
+    require_local(address, &headers)?;
+
+    let delay = query.delay.unwrap_or(0).min(30_000);
+    let hidden = query.hidden.as_deref() == Some("1");
+    let alert = query.alert.as_deref() == Some("1");
+    let tall = query.tall.as_deref() == Some("1");
+
+    let filler = if tall {
+        (1..=60)
+            .map(|index| format!("<p class=\"row\">列表第 {index} 行 —— 用于滚动验证</p>"))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
+    let target_button = if hidden {
+        // 留一个占位块，保证布局不塌，但按钮本身不存在。
+        "<div class=\"ghost\">（目标按钮已被隐藏）</div>".to_owned()
+    } else {
+        "<button id=\"target\" class=\"btn\">立即执行</button>".to_owned()
+    };
+
+    let html = format!(
+        r#"<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>PomBot 测试页</title><style>
+body{{margin:0;padding:32px;background:#fffdf8;color:#23362f;font:16px/1.9 system-ui,sans-serif;max-width:900px}}
+h1{{font-size:28px}} .btn{{font-size:20px;padding:12px 28px;border:0;border-radius:12px;background:#547665;color:#fff;cursor:pointer}}
+input{{font-size:20px;padding:10px 14px;border:1px solid #b9c4bd;border-radius:10px;width:320px}}
+.row{{margin:6px 0}} .ghost{{height:48px;line-height:48px;color:#87918b}}
+#result{{font-size:22px;font-weight:700;color:#2f5644;margin-top:16px;min-height:32px}}
+</style></head><body>
+<h1>PomBot 测试页</h1>
+<p class="row">基线文本 ABC-123</p>
+<p class="row">用途：给自动化脚本一个可控的目标，能制造延迟、遮挡、隐藏与滚动。</p>
+<div>{target_button}</div>
+<div id="result"></div>
+<hr>
+<p class="row">输入与回显</p>
+<div><input id="note" placeholder="在这里输入文字"><button id="submit" class="btn">提交</button></div>
+<div id="echo"></div>
+<hr>
+{filler}
+<p class="row" id="tail">列表底部标记</p>
+<script>
+const delay = {delay};
+const target = document.getElementById('target');
+if (target) {{
+  target.addEventListener('click', () => {{
+    const box = document.getElementById('result');
+    box.textContent = '正在处理…';
+    setTimeout(() => {{ box.textContent = '延迟完成'; }}, delay);
+  }});
+}}
+document.getElementById('submit').addEventListener('click', () => {{
+  const value = document.getElementById('note').value;
+  document.getElementById('echo').textContent = '已提交：' + value;
+}});
+if ({alert_literal}) {{ alert('这是一条遮挡弹窗'); }}
+</script>
+</body></html>"#,
+        alert_literal = if alert { "true" } else { "false" },
+    );
+
+    Ok(Html(html))
 }
 
 async fn pairing_status(
