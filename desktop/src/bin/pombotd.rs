@@ -94,6 +94,71 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    // 脚本执行入口：拿 JSON 动作序列去操作一个已经打开的窗口。
+    // 这条路径不启动服务、不连手机，纯粹是开发与回归用的工具。
+    if let Some(index) = args.iter().position(|arg| arg == "--run-script") {
+        let Some(file) = args.get(index + 1) else {
+            anyhow::bail!("用法：pombotd.exe --run-script <脚本.json> --window <标题关键字>");
+        };
+        let text =
+            std::fs::read_to_string(file).with_context(|| format!("读取脚本失败：{file}"))?;
+        // Windows 记事本另存为「UTF-8」时会在开头写 BOM，serde 不认，直接报
+        // "expected value at line 1 column 1"。用户不该为此调试，这里直接吃掉。
+        let actions: Vec<pombot::gui::executor::Action> =
+            serde_json::from_str(text.trim_start_matches('\u{feff}'))
+                .context("脚本格式错误（应为动作数组）")?;
+
+        if args.iter().any(|arg| arg == "--dry-run") {
+            println!("解析到 {} 个动作：", actions.len());
+            for (order, action) in actions.iter().enumerate() {
+                println!("  {}. {action:?}", order + 1);
+            }
+            return Ok(());
+        }
+
+        let title = args
+            .iter()
+            .position(|arg| arg == "--window")
+            .and_then(|position| args.get(position + 1))
+            .context("缺少 --window <标题关键字>")?;
+        let window = pombot::gui::window::find_by_title(title)
+            .with_context(|| format!("找不到标题包含「{title}」的窗口"))?;
+        println!("目标窗口：{}", window.title);
+
+        let mut executor = pombot::gui::executor::Executor::new(window.hwnd);
+        executor.set_trace(true);
+        return match executor.run(&actions) {
+            Ok(report) => {
+                println!("完成：{} 步，{} ms", report.steps, report.elapsed_ms);
+                Ok(())
+            }
+            Err(error) => {
+                // 失败取证：把当时看到的画面与识别结果留下来，
+                // 否则只能看到"找不到某文字"，无从判断界面到底是什么样。
+                if let Some(position) = args.iter().position(|arg| arg == "--save-failure")
+                    && let Some(dir) = args.get(position + 1)
+                {
+                    let dir = std::path::Path::new(dir);
+                    let _ = std::fs::create_dir_all(dir);
+                    if let Ok(scene) = pombot::gui::capture::capture_window_scene(window.hwnd) {
+                        let _ = scene.shot.save_png(&dir.join("failure.png"));
+                        if let Ok(lines) = pombot::gui::ocr::recognize_shot_lines(&scene.shot, 2.0)
+                        {
+                            let dump = lines
+                                .iter()
+                                .map(|line| line.text.clone())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let _ = std::fs::write(dir.join("failure-ocr.txt"), dump);
+                        }
+                    }
+                    eprintln!("失败现场已保存到 {}", dir.display());
+                }
+                Err(error)
+            }
+        };
+    }
+
     let config = AppConfig::load(&paths)?;
     let port = config.server.port;
 

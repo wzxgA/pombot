@@ -125,6 +125,8 @@ pub struct Executor {
     stagnation: Stagnation,
     click_counts: HashMap<(i32, i32), usize>,
     before: Option<Observation>,
+    /// 逐动作打印判定结果。命令行跑脚本时打开，便于看清每一步到底做了什么。
+    trace: bool,
 }
 
 impl Executor {
@@ -135,6 +137,7 @@ impl Executor {
             limits: Limits::default(),
             stagnation: Stagnation::default(),
             click_counts: HashMap::new(),
+            trace: false,
             before: None,
         }
     }
@@ -143,6 +146,12 @@ impl Executor {
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// 打开逐动作日志。命令行跑脚本时用，库调用方默认关闭。
+    // @author wzxgqtl 2026-11-22
+    pub fn set_trace(&mut self, enabled: bool) {
+        self.trace = enabled;
     }
 
     /// 按顺序执行动作。任何一步失败或判定卡死都会立刻返回错误，
@@ -183,6 +192,18 @@ impl Executor {
             };
             let verdict = compare(&before, &after.shot);
             last_changed = verdict.changed;
+
+            if self.trace {
+                eprintln!(
+                    "[{}/{}] {:?} → changed={} hamming={} ratio={:.5}",
+                    index + 1,
+                    actions.len(),
+                    action,
+                    verdict.changed,
+                    verdict.hamming,
+                    verdict.ratio
+                );
+            }
 
             if self.stagnation.record(verdict.changed) {
                 bail!(

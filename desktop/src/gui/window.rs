@@ -4,6 +4,7 @@
 
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
@@ -88,6 +89,14 @@ pub fn focus_verified(hwnd: HWND) -> Result<(), String> {
             return Ok(());
         }
 
+        let _ = SetForegroundWindow(hwnd);
+        if foreground() == Some(hwnd) {
+            return Ok(());
+        }
+
+        // 第二个办法：先模拟一次 ALT 按键。系统会因此认为"本进程刚收到用户输入"，
+        // 从而解除前台锁。实测在终端里跑脚本时，前两种都会失败，只有这一条能过。
+        let _ = crate::gui::input::tap_key(VIRTUAL_KEY(0x12)); // VK_MENU = ALT
         let _ = SetForegroundWindow(hwnd);
         if foreground() == Some(hwnd) {
             return Ok(());
