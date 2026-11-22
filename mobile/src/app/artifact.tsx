@@ -4,8 +4,11 @@
 // 不渲染 HTML、不执行任何脚本：产物内容一律当纯文本处理，避免注入。
 
 import Markdown from '@ronradtke/react-native-markdown-display';
+import { File, Paths } from 'expo-file-system';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
+import Pdf from 'react-native-pdf';
+import { WebView } from 'react-native-webview';
 import {
   ActivityIndicator,
   Image,
@@ -34,6 +37,7 @@ export default function ArtifactScreen() {
   const [device, setDevice] = useState<PairedDevice | null>(null);
   const [item, setItem] = useState<ObjectItem | null>(null);
   const [text, setText] = useState('');
+  const [localPdfUri, setLocalPdfUri] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -76,16 +80,20 @@ export default function ArtifactScreen() {
   const mime = item?.artifact?.mime ?? '';
   const blobId = item?.artifact?.blobId ?? '';
   const isImage = mime.startsWith('image/');
+  const isPdf = mime === 'application/pdf' || item?.artifact?.name.toLowerCase().endsWith('.pdf');
+  const isHtml = mime === 'text/html' || item?.artifact?.name.toLowerCase().endsWith('.html') || item?.artifact?.name.toLowerCase().endsWith('.htm');
   const isMarkdown =
     mime === 'text/markdown' ||
     item?.artifact?.name.toLowerCase().endsWith('.md') ||
     item?.artifact?.name.toLowerCase().endsWith('.markdown');
   const isText = (mime.startsWith('text/') || mime === 'application/json') && !isMarkdown;
   // 大文件不内联渲染：这类判断是纯派生值，不该用 state 存。
-  const tooLarge = isText && (item?.artifact?.size ?? 0) > MAX_INLINE_BYTES;
+  const tooLarge = (isText || isMarkdown || isHtml) && (item?.artifact?.size ?? 0) > MAX_INLINE_BYTES;
+  const pdfTooLarge = isPdf && (item?.artifact?.size ?? 0) > LARGE_FILE_BYTES;
+  const artifactUri = device && blobId ? artifactUrl(getServerConnection(device).baseUrl, device, blobId) : '';
 
   useEffect(() => {
-    if (!device || !blobId || (!isText && !isMarkdown) || tooLarge) return;
+    if (!device || !blobId || (!isText && !isMarkdown && !isHtml) || tooLarge) return;
     let active = true;
     fetch(artifactUrl(getServerConnection(device).baseUrl, device, blobId))
       .then((response) => (response.ok ? response.text() : Promise.reject(new Error('下载失败'))))
@@ -101,7 +109,26 @@ export default function ArtifactScreen() {
     return () => {
       active = false;
     };
-  }, [device, blobId, isText, isMarkdown, tooLarge]);
+  }, [device, blobId, isText, isMarkdown, isHtml, tooLarge]);
+
+  useEffect(() => {
+    if (!device || !blobId || !isPdf || pdfTooLarge || localPdfUri) return;
+    const target = new File(Paths.cache, `pombot-${blobId}.pdf`);
+    let active = true;
+    File.downloadFileAsync(artifactUri, target, { idempotent: true })
+      .then((file) => {
+        if (active) setLocalPdfUri(file.uri);
+      })
+      .catch((reason) => {
+        if (active) setError(String(reason));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [device, blobId, isPdf, pdfTooLarge, localPdfUri, artifactUri]);
 
   const openExternally = () => {
     if (!device || !item?.artifact) return;
@@ -144,16 +171,20 @@ export default function ArtifactScreen() {
         </Pressable>
       ) : null}
 
-      {loading && !isImage && !tooLarge ? (
+      {loading && !isImage && !isPdf && !tooLarge ? (
         <ActivityIndicator style={styles.spinner} color="#547665" />
       ) : null}
 
-      {isImage && device && blobId ? (
-        <Image
-          source={{ uri: artifactUrl(getServerConnection(device).baseUrl, device, blobId) }}
-          style={styles.image}
-          resizeMode="contain"
-        />
+      {isImage && artifactUri ? (
+        <Image source={{ uri: artifactUri }} style={styles.image} resizeMode="contain" />
+      ) : null}
+
+      {isPdf && localPdfUri && !pdfTooLarge ? (
+        <Pdf source={{ uri: localPdfUri }} style={styles.pdf} trustAllCerts={false} />
+      ) : null}
+
+      {isHtml && !tooLarge && artifactUri ? (
+        <WebView source={{ uri: artifactUri }} style={styles.webView} originWhitelist={['*']} javaScriptEnabled={false} />
       ) : null}
 
       {isMarkdown && !tooLarge ? (
@@ -168,7 +199,7 @@ export default function ArtifactScreen() {
         </ScrollView>
       ) : null}
 
-      {tooLarge ? (
+      {(tooLarge || pdfTooLarge) ? (
         <View style={styles.fallback}>
           <Text style={styles.hint}>文件较大，不内联预览。</Text>
           <Pressable style={styles.button} onPress={openExternally}>
@@ -177,7 +208,7 @@ export default function ArtifactScreen() {
         </View>
       ) : null}
 
-      {!isImage && !isText && !isMarkdown ? (
+      {!isImage && !isPdf && !isHtml && !isText && !isMarkdown ? (
         <View style={styles.fallback}>
           <Text style={styles.hint}>这类文件不在应用内预览。</Text>
           <Pressable style={styles.button} onPress={openExternally}>
@@ -214,6 +245,8 @@ const styles = StyleSheet.create({
   errorText: { color: '#834d43', lineHeight: 20 },
   spinner: { marginTop: 24 },
   image: { flex: 1, margin: 16, borderRadius: 14 },
+  pdf: { flex: 1, width: '100%' },
+  webView: { flex: 1, backgroundColor: '#fffdf8' },
   textBody: { padding: 20 },
   markdownBody: { padding: 20, paddingBottom: 40 },
   mono: { color: '#3c4a43', fontSize: 13, lineHeight: 21, fontFamily: 'monospace' },
