@@ -1,0 +1,12 @@
+[
+  {"action":"expect_text","text":"PomBot M4 浏览器测试页"},
+  {"action":"click","target":{"text":"点击冒烟按钮"}},
+  {"action":"expect_text","text":"冒烟按钮已点击"},
+  {"action":"click","target":{"text":"请输入中文"}},
+  {"action":"type","text":"PomBot 中文验收"},
+  {"action":"click","target":{"text":"提交输入"}},
+  {"action":"expect_text","text":"已提交：PomBot 中文验收"},
+  {"action":"scroll","target":{"x":800,"y":700},"lines":18},
+  {"action":"wait_for_text","text":"懒加载内容已出现：阶段 2 通过","timeout_ms":8000},
+  {"action":"screenshot","path":"artifacts/m4-browser-stage0-4.png"}
+]

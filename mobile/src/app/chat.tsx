@@ -192,6 +192,9 @@ export default function ChatScreen() {
           <Pressable onPress={() => router.push('/artifacts')} hitSlop={10}>
             <Text style={styles.nav}>产物</Text>
           </Pressable>
+          <Pressable onPress={() => router.push('/vision')} hitSlop={10}>
+            <Text style={styles.nav}>视觉</Text>
+          </Pressable>
           <Pressable onPress={unpair} hitSlop={12}>
             <Text style={styles.unpair}>解除配对</Text>
           </Pressable>

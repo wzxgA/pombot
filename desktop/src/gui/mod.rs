@@ -8,6 +8,7 @@ pub mod executor;
 pub mod input;
 pub mod locate;
 pub mod ocr;
+pub mod perception;
 pub mod verify;
 pub mod window;
 

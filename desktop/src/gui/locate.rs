@@ -30,8 +30,17 @@ pub struct Hit {
 /// 这样"场景探针"允许错一个字，而两三个字的短目标仍然要求基本准确。
 // @author wzxgqtl 2026-11-22
 pub fn find_best(lines: &[OcrLine], target: &str) -> Option<Hit> {
-    if let Some(hit) = find_text(lines, target, 0) {
+    find_best_occurrence(lines, target, 0)
+}
+
+/// 与 `find_best` 相同，但允许选择同一文本的第 N 个命中。
+// @author wzxgqtl 2026-11-22
+pub fn find_best_occurrence(lines: &[OcrLine], target: &str, occurrence: usize) -> Option<Hit> {
+    if let Some(hit) = find_text(lines, target, occurrence) {
         return Some(hit);
+    }
+    if occurrence > 0 {
+        return None;
     }
     let needle = normalized_chars(target);
     if needle.len() < 2 {

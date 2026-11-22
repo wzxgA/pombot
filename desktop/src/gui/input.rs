@@ -292,6 +292,25 @@ pub fn ctrl_key(vk: VIRTUAL_KEY) -> Result<(), String> {
     ])
 }
 
+/// 发送一个带修饰键的按键序列，元素为 (虚拟键, 是否释放)。
+pub fn send_key_sequence(keys: &[(VIRTUAL_KEY, bool)]) -> Result<(), String> {
+    let inputs: Vec<INPUT> = keys
+        .iter()
+        .map(|(vk, up)| {
+            key_input(
+                *vk,
+                0,
+                if *up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+            )
+        })
+        .collect();
+    send_inputs(&inputs)
+}
+
 /// 写入剪贴板。走 Win32 而不引入第三方 crate，只为一次粘贴不值得加依赖。
 // @author wzxgqtl 2026-11-22
 pub fn set_clipboard_text(text: &str) -> Result<(), String> {

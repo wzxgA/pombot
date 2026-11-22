@@ -1,0 +1,9 @@
+[
+  {"action":"wait_for_text","text":"pombot-cli-smoke","timeout_ms":10000},
+  {"action":"click","target":{"text":"pombot-cli-smoke"}},
+  {"action":"keys","combo":"ctrl+a"},
+  {"action":"type","text":"PomBot M4 回归通过"},
+  {"action":"keys","combo":"ctrl+s"},
+  {"action":"wait_for_text","text":"PomBot M4 回归通过","timeout_ms":10000},
+  {"action":"screenshot","path":"artifacts/m4-notepad-roundtrip.png"}
+]

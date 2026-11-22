@@ -21,6 +21,14 @@ pub struct Contract {
 
     pub chat_send: Option<ChatSend>,
 
+    pub vision_cancel: Option<VisionCancel>,
+
+    pub vision_done: Option<VisionDone>,
+
+    pub vision_progress: Option<VisionProgress>,
+
+    pub vision_start: Option<VisionStart>,
+
     pub envelope: Option<Envelope>,
 
     pub error: Option<Error>,
@@ -188,6 +196,18 @@ pub enum Type {
     #[serde(rename = "chat.send")]
     ChatSend,
 
+    #[serde(rename = "vision.cancel")]
+    VisionCancel,
+
+    #[serde(rename = "vision.done")]
+    VisionDone,
+
+    #[serde(rename = "vision.progress")]
+    VisionProgress,
+
+    #[serde(rename = "vision.start")]
+    VisionStart,
+
     Error,
 
     #[serde(rename = "lock.acquire")]
@@ -238,6 +258,42 @@ pub enum Type {
 
     #[serde(rename = "tool.decision")]
     ToolDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisionCancel {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisionDone {
+    pub message: String,
+
+    pub success: bool,
+
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisionProgress {
+    pub action_count: i64,
+
+    pub message: String,
+
+    pub status: VisionStatus,
+
+    pub step: i64,
+
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisionStart {
+    pub goal: String,
+
+    pub task_id: String,
+
+    pub window_title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -430,6 +486,17 @@ pub enum Risk {
     Low,
 
     Medium,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionStatus {
+    Actions,
+    Cancelled,
+    Failed,
+    Finished,
+    Observed,
+    Started,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

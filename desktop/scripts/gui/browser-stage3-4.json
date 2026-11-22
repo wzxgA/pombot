@@ -1,0 +1,13 @@
+[
+  {"action":"click","target":{"text":"触发提示弹窗"}},
+  {"action":"dialog","accept":true},
+  {"action":"wait_for_text","text":"提示弹窗已处理","timeout_ms":3000},
+  {"action":"click","target":{"text":"触发确认弹窗"}},
+  {"action":"dialog","accept":true},
+  {"action":"wait_for_text","text":"确认弹窗已接受","timeout_ms":3000},
+  {"action":"click","target":{"text":"打开第二页"}},
+  {"action":"wait_for_text","text":"第二页已加载：导航成功","timeout_ms":5000},
+  {"action":"keys","combo":"alt+left"},
+  {"action":"wait_for_text","text":"页面已加载","timeout_ms":5000},
+  {"action":"screenshot","path":"artifacts/m4-browser-stage3-4.png"}
+]

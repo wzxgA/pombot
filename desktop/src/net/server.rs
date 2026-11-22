@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     net::UdpSocket,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -34,9 +37,13 @@ use crate::{
         Auth, AuthOk, ChatDelta, ChatDone, ChatHistory, ChatHistoryResult, ChatSend, Envelope,
         LockChanged, LockRequest, LockState, ObjectOpKind, PairChallenge, PairConfirm, PairResult,
         PairStart, Risk, SyncChanges, SyncPull, SyncPush, SyncPushResult, ToolConfirm,
-        ToolDecision, Type,
+        ToolDecision, Type, VisionCancel, VisionDone, VisionProgress, VisionStart, VisionStatus,
     },
-    core::llm::{LlmClient, RequestMessage},
+    core::{
+        agent::{AgentEvent, AgentLoop},
+        llm::{LlmClient, RequestMessage},
+        vision::VisionDriver,
+    },
     net::{
         discovery,
         pairing::{PairingManager, hash_token},
@@ -59,6 +66,7 @@ struct AppState {
     clients: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Envelope>>>>,
     /// 等待用户裁决的高风险工具调用。key 是 call_id。
     pending_confirms: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
+    active_vision_tasks: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 /// 高风险操作的确认窗口。超时按拒绝处理，避免无人值守时自动放行。
@@ -102,6 +110,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
         data_dir: paths.data_dir.clone(),
         clients: Arc::new(Mutex::new(HashMap::new())),
         pending_confirms: Arc::new(Mutex::new(HashMap::new())),
+        active_vision_tasks: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -699,6 +708,56 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
                     }
                 }
             }
+            Type::VisionCancel => match protocol::payload::<VisionCancel>(&envelope) {
+                Ok(payload) => {
+                    if let Some(cancel) = state
+                        .active_vision_tasks
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .get(&payload.task_id)
+                    {
+                        cancel.store(true, Ordering::Release);
+                    } else {
+                        let _ = outbound
+                            .send(error_envelope("视觉任务不存在或已结束", Some(request_id)));
+                    }
+                }
+                Err(error) => {
+                    let _ = outbound.send(error_envelope(
+                        format!("消息参数错误：{error}"),
+                        Some(request_id),
+                    ));
+                }
+            },
+            Type::VisionStart => match protocol::payload::<VisionStart>(&envelope) {
+                Ok(payload) => {
+                    let Some(window) = crate::gui::window::find_by_title(&payload.window_title)
+                    else {
+                        let _ = outbound.send(error_envelope(
+                            format!("找不到窗口：{}", payload.window_title),
+                            Some(request_id),
+                        ));
+                        continue;
+                    };
+                    let state = state.clone();
+                    let outbound = outbound.clone();
+                    let hwnd = window.hwnd.0 as isize;
+                    std::thread::spawn(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        if let Ok(runtime) = runtime {
+                            runtime.block_on(run_vision(state, outbound, payload, hwnd));
+                        }
+                    });
+                }
+                Err(error) => {
+                    let _ = outbound.send(error_envelope(
+                        format!("消息参数错误：{error}"),
+                        Some(request_id),
+                    ));
+                }
+            },
             Type::ChatSend => match protocol::payload::<ChatSend>(&envelope) {
                 Ok(payload) => {
                     let state = state.clone();
@@ -1189,6 +1248,96 @@ async fn run_chat(
         },
     ) {
         let _ = outbound.send(event);
+    }
+}
+
+async fn run_vision(
+    state: AppState,
+    outbound: mpsc::UnboundedSender<Envelope>,
+    payload: VisionStart,
+    hwnd_value: isize,
+) {
+    let hwnd = windows::Win32::Foundation::HWND(hwnd_value as *mut std::ffi::c_void);
+    let Ok(client) = LlmClient::new(state.config.llm.default.clone()) else {
+        let _ = outbound.send(error_envelope("模型配置无效", None));
+        return;
+    };
+    let driver = VisionDriver::new(hwnd, client, payload.goal.clone());
+    let cancel = driver.cancellation_token();
+    if state
+        .active_vision_tasks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(payload.task_id.clone(), Arc::clone(&cancel))
+        .is_some()
+    {
+        let _ = outbound.send(error_envelope("同一个视觉任务 ID 已在运行", None));
+        return;
+    }
+    let task_id = payload.task_id.clone();
+    let progress_outbound = outbound.clone();
+    let mut agent = AgentLoop::new_with_cancellation(driver, Arc::clone(&cancel));
+    let result = agent
+        .run_async(payload.goal, |event| {
+            let (status, step, action_count, message) = match event {
+                AgentEvent::Started => (VisionStatus::Started, 0, 0, "任务开始".to_owned()),
+                AgentEvent::Observed { step } => (
+                    VisionStatus::Observed,
+                    step as i64,
+                    0,
+                    "已完成观察".to_owned(),
+                ),
+                AgentEvent::ActionBatch { step, count } => (
+                    VisionStatus::Actions,
+                    step as i64,
+                    count as i64,
+                    "正在执行动作".to_owned(),
+                ),
+                AgentEvent::Finished { steps } => (
+                    VisionStatus::Finished,
+                    steps.saturating_sub(1) as i64,
+                    0,
+                    "任务完成".to_owned(),
+                ),
+                AgentEvent::Cancelled { step } => (
+                    VisionStatus::Cancelled,
+                    step as i64,
+                    0,
+                    "任务已取消".to_owned(),
+                ),
+            };
+            if let Ok(envelope) = new_envelope(
+                Type::VisionProgress,
+                VisionProgress {
+                    task_id: task_id.clone(),
+                    status,
+                    step,
+                    action_count,
+                    message,
+                },
+            ) {
+                let _ = progress_outbound.send(envelope);
+            }
+        })
+        .await;
+    state
+        .active_vision_tasks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&task_id);
+    let (success, message) = match result {
+        Ok(message) => (true, message),
+        Err(error) => (false, error.to_string()),
+    };
+    if let Ok(envelope) = new_envelope(
+        Type::VisionDone,
+        VisionDone {
+            task_id,
+            success,
+            message,
+        },
+    ) {
+        let _ = outbound.send(envelope);
     }
 }
 

@@ -15,6 +15,10 @@
     "chatHistoryResult": { "$ref": "#/$defs/ChatHistoryResultPayload" },
     "chatDelta": { "$ref": "#/$defs/ChatDeltaPayload" },
     "chatDone": { "$ref": "#/$defs/ChatDonePayload" },
+    "visionStart": { "$ref": "#/$defs/VisionStartPayload" },
+    "visionProgress": { "$ref": "#/$defs/VisionProgressPayload" },
+    "visionDone": { "$ref": "#/$defs/VisionDonePayload" },
+    "visionCancel": { "$ref": "#/$defs/VisionCancelPayload" },
     "error": { "$ref": "#/$defs/ErrorPayload" },
 
     "objectRecord": { "$ref": "#/$defs/ObjectRecord" },
@@ -39,7 +43,7 @@
       "properties": {
         "v": { "type": "integer", "const": 1 },
         "id": { "type": "string", "format": "uuid" },
-        "type": { "type": "string", "enum": ["auth", "auth.ok", "pair.start", "pair.challenge", "pair.confirm", "pair.result", "chat.send", "chat.history", "chat.history.result", "chat.delta", "chat.done", "sync.pull", "sync.changes", "sync.push", "sync.push.result", "lock.acquire", "lock.release", "lock.heartbeat", "lock.state", "lock.changed", "tool.confirm", "tool.decision", "ping", "pong", "error"] },
+        "type": { "type": "string", "enum": ["auth", "auth.ok", "pair.start", "pair.challenge", "pair.confirm", "pair.result", "chat.send", "chat.history", "chat.history.result", "chat.delta", "chat.done", "vision.start", "vision.progress", "vision.done", "vision.cancel", "sync.pull", "sync.changes", "sync.push", "sync.push.result", "lock.acquire", "lock.release", "lock.heartbeat", "lock.state", "lock.changed", "tool.confirm", "tool.decision", "ping", "pong", "error"] },
         "ts": { "type": "integer", "minimum": 0 },
         "nonce": { "type": "string", "minLength": 8, "maxLength": 128 },
         "payload": true
@@ -157,6 +161,46 @@
         "session_id": { "type": "string" },
         "message_id": { "type": "string" },
         "content": { "type": "string" }
+      }
+    },
+    "VisionStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "goal", "window_title"],
+      "properties": {
+        "task_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "goal": { "type": "string", "minLength": 1, "maxLength": 32000 },
+        "window_title": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "VisionProgressPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "status", "step", "action_count", "message"],
+      "properties": {
+        "task_id": { "type": "string" },
+        "status": { "type": "string", "enum": ["started", "observed", "actions", "finished", "cancelled", "failed"] },
+        "step": { "type": "integer", "minimum": 0 },
+        "action_count": { "type": "integer", "minimum": 0 },
+        "message": { "type": "string" }
+      }
+    },
+    "VisionDonePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "success", "message"],
+      "properties": {
+        "task_id": { "type": "string" },
+        "success": { "type": "boolean" },
+        "message": { "type": "string" }
+      }
+    },
+    "VisionCancelPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id"],
+      "properties": {
+        "task_id": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
     "ErrorPayload": {

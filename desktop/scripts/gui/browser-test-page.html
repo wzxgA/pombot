@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PomBot M4 浏览器测试页</title>
+  <style>
+    :root { color-scheme: light; font: 18px/1.6 system-ui, sans-serif; }
+    body { margin: 0; min-height: 2200px; background: #f5f1e8; color: #24352b; }
+    main { width: min(860px, calc(100% - 48px)); margin: 0 auto; padding: 48px 0 160px; }
+    section { margin: 24px 0; padding: 24px; border: 2px solid #344e41; border-radius: 14px; background: #fffdf7; }
+    button, input { font: inherit; padding: 10px 14px; border: 2px solid #344e41; border-radius: 8px; }
+    button { cursor: pointer; background: #dce8d5; }
+    button:hover { background: #c5d9bb; }
+    #lazy { min-height: 160px; margin-top: 20px; padding: 20px; background: #e7efe2; }
+    .muted { color: #607568; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>PomBot M4 浏览器测试页</h1>
+  <p id="fixed-text">阶段 0 固定文本：页面已加载</p>
+  <section>
+    <h2>阶段 0：冒烟</h2>
+    <button id="smoke" type="button">点击冒烟按钮</button>
+    <p id="smoke-result" aria-live="polite">尚未点击</p>
+  </section>
+  <section>
+    <h2>阶段 1：中文输入</h2>
+    <label for="message">输入内容</label>
+    <input id="message" placeholder="请输入中文" autocomplete="off">
+    <button id="submit" type="button">提交输入</button>
+    <p id="submit-result" aria-live="polite">尚未提交</p>
+  </section>
+  <section>
+    <h2>阶段 4：多页导航</h2>
+    <a id="next-page" href="?page=2">打开第二页</a>
+    <p id="navigation-state">当前页面：第一页</p>
+  </section>
+  <section>
+    <h2>阶段 3：弹窗</h2>
+    <button id="alert" type="button">触发提示弹窗</button>
+    <button id="confirm" type="button">触发确认弹窗</button>
+    <p id="dialog-result">尚未处理弹窗</p>
+  </section>
+  <section>
+    <h2>阶段 2：懒加载</h2>
+    <p class="muted">滚动到页面底部后，内容会异步出现。</p>
+    <div id="lazy">懒加载区域尚未触发</div>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  if (new URLSearchParams(location.search).get('page') === '2') {
+    document.title = 'PomBot M4 第二页';
+    $('fixed-text').textContent = '第二页已加载：导航成功';
+    $('navigation-state').textContent = '当前页面：第二页';
+    $('next-page').textContent = '返回第一页';
+    $('next-page').href = 'browser-test-page.html';
+  }
+  $('smoke').addEventListener('click', () => $('smoke-result').textContent = '冒烟按钮已点击');
+  $('submit').addEventListener('click', () => {
+    $('submit-result').textContent = `已提交：${$('message').value}`;
+  });
+  $('alert').addEventListener('click', () => {
+    alert('PomBot 测试提示');
+    $('dialog-result').textContent = '提示弹窗已处理';
+  });
+  $('confirm').addEventListener('click', () => {
+    const accepted = confirm('是否确认 PomBot 测试操作？');
+    $('dialog-result').textContent = accepted ? '确认弹窗已接受' : '确认弹窗已取消';
+  });
+  let loaded = false;
+  const observer = new IntersectionObserver(entries => {
+    if (loaded || !entries.some(entry => entry.isIntersecting)) return;
+    loaded = true;
+    setTimeout(() => $('lazy').textContent = '懒加载内容已出现：阶段 2 通过', 1200);
+  });
+  observer.observe($('lazy'));
+</script>
+</body>
+</html>

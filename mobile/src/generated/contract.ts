@@ -23,6 +23,10 @@ export interface Contract {
   chatHistoryResult?: ChatHistoryResultPayload;
   chatDelta?: ChatDeltaPayload;
   chatDone?: ChatDonePayload;
+  visionStart?: VisionStartPayload;
+  visionProgress?: VisionProgressPayload;
+  visionDone?: VisionDonePayload;
+  visionCancel?: VisionCancelPayload;
   error?: ErrorPayload;
   objectRecord?: ObjectRecord;
   objectDraft?: ObjectDraft;
@@ -54,6 +58,10 @@ export interface Envelope {
     | "chat.history.result"
     | "chat.delta"
     | "chat.done"
+    | "vision.start"
+    | "vision.progress"
+    | "vision.done"
+    | "vision.cancel"
     | "sync.pull"
     | "sync.changes"
     | "sync.push"
@@ -126,6 +134,27 @@ export interface ChatDonePayload {
   session_id: string;
   message_id: string;
   content: string;
+}
+export interface VisionStartPayload {
+  task_id: string;
+  goal: string;
+  window_title: string;
+}
+export type VisionStatus = "started" | "observed" | "actions" | "finished" | "cancelled" | "failed";
+export interface VisionProgressPayload {
+  task_id: string;
+  status: VisionStatus;
+  step: number;
+  action_count: number;
+  message: string;
+}
+export interface VisionDonePayload {
+  task_id: string;
+  success: boolean;
+  message: string;
+}
+export interface VisionCancelPayload {
+  task_id: string;
 }
 export interface ErrorPayload {
   code?: string;

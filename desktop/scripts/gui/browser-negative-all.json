@@ -1,0 +1,11 @@
+{
+  "cases": [
+    {"name":"missing_target","actions":[{"action":"click","target":{"text":"不存在的按钮"}}]},
+    {"name":"delayed_content","actions":[{"action":"wait_for_text","text":"懒加载内容已出现：阶段 2 通过","timeout_ms":5000}]},
+    {"name":"blocked_dialog","actions":[{"action":"click","target":{"text":"触发提示弹窗"}},{"action":"keys","combo":"enter"}]},
+    {"name":"zoom_150_percent","actions":[{"action":"expect_text","text":"PomBot M4 浏览器测试页"}]},
+    {"name":"cancel_long_wait","actions":[{"action":"wait","ms":30000}]},
+    {"name":"black_screen","actions":[{"action":"screenshot","path":"artifacts/black-screen.png"}]},
+    {"name":"stagnation","actions":[{"action":"move","target":{"x":10,"y":10}},{"action":"move","target":{"x":10,"y":10}},{"action":"move","target":{"x":10,"y":10}}]}
+  ]
+}

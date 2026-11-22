@@ -10,13 +10,18 @@
 
 use std::{
     collections::HashMap,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_LEFT, VK_MENU};
 
 use crate::gui::{
     capture::capture_window_scene,
@@ -24,7 +29,7 @@ use crate::gui::{
         click_at, ctrl_key, double_click_at, drag, move_to, right_click_at, scroll_at, tap_key,
         type_text,
     },
-    locate::find_best,
+    locate::find_best_occurrence,
     ocr::recognize_shot_lines,
     verify::{Observation, Stagnation, compare},
 };
@@ -35,7 +40,7 @@ const OCR_SCALE: f32 = 2.0;
 const SETTLE_MS: u64 = 250;
 
 /// 一个动作的目标：给文字走 OCR 定位，给坐标直接点。
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Target {
     /// 目标文字。OCR 会说"点『导出』"，精确落点由包围盒决定。
     pub text: Option<String>,
@@ -46,7 +51,7 @@ pub struct Target {
     pub occurrence: usize,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
     Click {
@@ -85,10 +90,31 @@ pub enum Action {
         #[serde(default = "default_true")]
         present: bool,
     },
+    /// 条件等待，避免用固定 sleep 猜测页面加载时间。
+    WaitForText {
+        text: String,
+        #[serde(default = "default_wait_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_true")]
+        present: bool,
+    },
+    /// 处理浏览器原生 alert/confirm。弹窗不属于浏览器客户区，直接发送 Enter 或 Esc。
+    Dialog {
+        #[serde(default = "default_true")]
+        accept: bool,
+    },
+    /// 保存当前窗口截图，便于成功步骤或失败步骤回归取证。
+    Screenshot {
+        path: String,
+    },
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    10_000
 }
 
 /// 运行上限。默认值按"一次正常操作"留足余量，但仍能挡住死循环。
@@ -127,6 +153,7 @@ pub struct Executor {
     before: Option<Observation>,
     /// 逐动作打印判定结果。命令行跑脚本时打开，便于看清每一步到底做了什么。
     trace: bool,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Executor {
@@ -138,6 +165,7 @@ impl Executor {
             stagnation: Stagnation::default(),
             click_counts: HashMap::new(),
             trace: false,
+            cancel: Arc::new(AtomicBool::new(false)),
             before: None,
         }
     }
@@ -152,6 +180,16 @@ impl Executor {
     // @author wzxgqtl 2026-11-22
     pub fn set_trace(&mut self, enabled: bool) {
         self.trace = enabled;
+    }
+
+    /// 返回可共享的取消句柄，手机中止或全局 Esc 监听可调用它。
+    pub fn cancellation_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// 请求当前动作序列尽快停止。
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
     }
 
     /// 按顺序执行动作。任何一步失败或判定卡死都会立刻返回错误，
@@ -169,6 +207,9 @@ impl Executor {
         let mut last_changed = false;
 
         for (index, action) in actions.iter().enumerate() {
+            if self.cancel.load(Ordering::Acquire) {
+                bail!("动作序列已被取消（第 {} 步前）", index + 1);
+            }
             if started.elapsed() > Duration::from_secs(self.limits.max_seconds) {
                 bail!("执行超时：已超过 {} 秒", self.limits.max_seconds);
             }
@@ -179,10 +220,19 @@ impl Executor {
                 anyhow::anyhow!("第 {} 步（{:?}）失败：{error}", index + 1, action)
             })?;
 
-            std::thread::sleep(Duration::from_millis(SETTLE_MS));
+            if self.sleep_or_cancel(Duration::from_millis(SETTLE_MS)) {
+                bail!("动作序列已被取消（第 {} 步后）", index + 1);
+            }
 
-            // 等待类动作与纯输入不走变化判定：它们本来就可能不改变画面。
-            if matches!(action, Action::Wait { .. } | Action::Type { .. }) {
+            // 等待类动作、纯输入和截图不走变化判定：它们本来就可能不改变画面。
+            if matches!(
+                action,
+                Action::Wait { .. }
+                    | Action::Type { .. }
+                    | Action::WaitForText { .. }
+                    | Action::Dialog { .. }
+                    | Action::Screenshot { .. }
+            ) {
                 continue;
             }
 
@@ -254,23 +304,78 @@ impl Executor {
             Action::Type { text } => type_text(text).map_err(anyhow::Error::msg),
             Action::Keys { combo } => press(combo),
             Action::Wait { ms } => {
-                std::thread::sleep(Duration::from_millis(*ms));
+                if self.sleep_or_cancel(Duration::from_millis(*ms)) {
+                    bail!("动作序列已被取消（等待 {} ms 时）", ms);
+                }
                 Ok(())
             }
-            Action::ExpectText { text, present } => {
-                let scene = scene_of(self.hwnd)?;
-                let lines =
-                    recognize_shot_lines(&scene.shot, OCR_SCALE).map_err(anyhow::Error::msg)?;
-                let found = find_best(&lines, text).is_some();
-                if found == *present {
-                    Ok(())
-                } else if *present {
-                    bail!("期望界面上出现「{text}」，但没有找到")
-                } else {
-                    bail!("期望「{text}」已经消失，但它还在")
+            Action::ExpectText { text, present } => self.expect_text(text, *present),
+            Action::WaitForText {
+                text,
+                timeout_ms,
+                present,
+            } => {
+                let deadline = Instant::now() + Duration::from_millis(*timeout_ms);
+                loop {
+                    if self.text_present(text)? == *present {
+                        return Ok(());
+                    }
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "等待文本「{text}」超时（{} ms，期望 present={present}）",
+                            timeout_ms
+                        );
+                    }
+                    if self.sleep_or_cancel(Duration::from_millis(100)) {
+                        bail!("动作序列已被取消（等待文本「{text}」时）");
+                    }
                 }
             }
+            Action::Dialog { accept } => {
+                if *accept {
+                    tap_key(VIRTUAL_KEY(0x0D)).map_err(anyhow::Error::msg)
+                } else {
+                    tap_key(VIRTUAL_KEY(0x1B)).map_err(anyhow::Error::msg)
+                }
+            }
+            Action::Screenshot { path } => {
+                let scene = scene_of(self.hwnd)?;
+                scene
+                    .shot
+                    .save_png(Path::new(path))
+                    .map_err(anyhow::Error::msg)
+            }
         }
+    }
+
+    fn sleep_or_cancel(&self, duration: Duration) -> bool {
+        let deadline = Instant::now() + duration;
+        while Instant::now() < deadline {
+            if self.cancel.load(Ordering::Acquire) {
+                return true;
+            }
+            std::thread::sleep(
+                Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+        self.cancel.load(Ordering::Acquire)
+    }
+
+    fn expect_text(&self, text: &str, present: bool) -> Result<()> {
+        let found = self.text_present(text)?;
+        if found == present {
+            Ok(())
+        } else if present {
+            bail!("期望界面上出现「{text}」，但没有找到")
+        } else {
+            bail!("期望「{text}」已经消失，但它还在")
+        }
+    }
+
+    fn text_present(&self, text: &str) -> Result<bool> {
+        let scene = scene_of(self.hwnd)?;
+        let lines = recognize_shot_lines(&scene.shot, OCR_SCALE).map_err(anyhow::Error::msg)?;
+        Ok(find_best_occurrence(&lines, text, 0).is_some())
     }
 
     /// 文字目标靠 OCR 定位，坐标目标直接换算。返回值是**屏幕坐标**。
@@ -283,8 +388,12 @@ impl Executor {
         };
         let scene = scene_of(self.hwnd)?;
         let lines = recognize_shot_lines(&scene.shot, OCR_SCALE).map_err(anyhow::Error::msg)?;
-        let hit =
-            find_best(&lines, text).ok_or_else(|| anyhow::anyhow!("界面上找不到「{text}」"))?;
+        let hit = find_best_occurrence(&lines, text, target.occurrence).ok_or_else(|| {
+            anyhow::anyhow!(
+                "界面上找不到「{text}」的第 {} 个命中",
+                target.occurrence + 1
+            )
+        })?;
         let _ = origin;
         // 截图坐标是相对窗口的，点击要的是屏幕坐标。
         Ok((hit.center.0 + scene.origin.0, hit.center.1 + scene.origin.1))
@@ -314,6 +423,9 @@ fn scene_of(hwnd: HWND) -> Result<crate::gui::capture::WindowScene> {
 /// 支持全部虚拟键码只会让错误输入更难发现。
 fn press(combo: &str) -> Result<()> {
     let combo = combo.trim().to_ascii_lowercase();
+    if combo == "alt+left" {
+        return send_alt_key(VK_LEFT).map_err(anyhow::Error::msg);
+    }
     if let Some(rest) = combo.strip_prefix("ctrl+") {
         let mut chars = rest.chars();
         let (Some(ch), None) = (chars.next(), chars.next()) else {
@@ -331,6 +443,11 @@ fn press(combo: &str) -> Result<()> {
         other => bail!("不支持的按键「{other}」"),
     };
     tap_key(VIRTUAL_KEY(vk)).map_err(anyhow::Error::msg)
+}
+
+fn send_alt_key(vk: VIRTUAL_KEY) -> Result<(), String> {
+    use crate::gui::input::send_key_sequence;
+    send_key_sequence(&[(VK_MENU, false), (vk, false), (vk, true), (VK_MENU, true)])
 }
 
 #[cfg(test)]
@@ -358,6 +475,24 @@ mod tests {
             actions[5],
             Action::ExpectText { present: false, .. }
         ));
+
+        let conditional: Vec<Action> = serde_json::from_str(
+            r#"[
+                {"action":"wait_for_text","text":"完成","timeout_ms":3000},
+                {"action":"dialog","accept":true},
+                    {"action":"screenshot","path":"artifacts/step.png"}
+                ]"#,
+        )
+        .expect("应能解析条件等待和截图");
+        assert!(matches!(
+            conditional[0],
+            Action::WaitForText {
+                timeout_ms: 3000,
+                ..
+            }
+        ));
+        assert!(matches!(conditional[1], Action::Dialog { accept: true }));
+        assert!(matches!(conditional[2], Action::Screenshot { .. }));
     }
 
     #[test]

@@ -1,0 +1,4 @@
+[
+  {"action":"click","target":{"text":"不存在的按钮"}},
+  {"action":"expect_text","text":"这一步不应执行"}
+]
