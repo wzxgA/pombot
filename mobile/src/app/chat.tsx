@@ -22,6 +22,7 @@ import type { ToolConfirmPayload } from '../generated/contract';
 import { ChatStore, type ChatMessage, type ConnectionStatus } from '../lib/chat';
 import { getServerConnection, resetServerConnection, type ServerConnection } from '../lib/connection';
 import { clearPairedDevice, loadPairedDevice } from '../lib/identity';
+import { loadConnectionMode, saveConnectionMode, type ConnectionMode } from '../lib/prefs';
 
 interface PendingConfirm {
   callId: string;
@@ -37,6 +38,8 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [network, setNetwork] = useState<'lan' | 'public' | null>(null);
+  const [diagnostic, setDiagnostic] = useState('');
+  const [mode, setModeState] = useState<ConnectionMode>('auto');
   const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
   const store = useRef<ChatStore | null>(null);
   const connection = useRef<ServerConnection | null>(null);
@@ -75,8 +78,16 @@ export default function ChatScreen() {
         unsubscribe = client.onStatus((next) => {
           setStatus(next);
           setNetwork(client.network);
+          // 一并带出探测结果：连不上时用户需要知道它试过哪些地址。
+          setDiagnostic(client.diagnostic);
         });
         client.connect();
+        // 恢复上次选择的连接方式。放在 connect 之后，模式若不同会立刻按新模式重连。
+        loadConnectionMode().then((saved) => {
+          if (!active) return;
+          setModeState(saved);
+          client.setMode(saved);
+        });
       })
       .catch((reason) => setError(String(reason)));
     return () => {
@@ -99,6 +110,19 @@ export default function ChatScreen() {
       connection.current?.send('tool.decision', { call_id: confirm.callId, approve });
     }
     setConfirm(null);
+  };
+
+  // 三档连接优先级。切换立刻生效并持久化，重启后仍然记住。
+  const MODE_LABELS: Record<ConnectionMode, string> = {
+    auto: '自动',
+    lan: '内网',
+    public: '外网',
+  };
+  const switchMode = (next: ConnectionMode) => {
+    if (next === mode || !connection.current) return;
+    setModeState(next);
+    connection.current.setMode(next);
+    saveConnectionMode(next);
   };
 
   const send = () => {
@@ -142,6 +166,24 @@ export default function ChatScreen() {
                 ? '正在连接电脑…'
                 : '离线，正在重连'}
           </Text>
+          {!connected && diagnostic ? (
+            <Text style={styles.diagnostic} numberOfLines={2}>
+              {diagnostic}
+            </Text>
+          ) : null}
+          <View style={styles.modeRow}>
+            {(['auto', 'lan', 'public'] as ConnectionMode[]).map((item) => (
+              <Pressable
+                key={item}
+                style={[styles.modeChip, mode === item && styles.modeChipActive]}
+                onPress={() => switchMode(item)}
+              >
+                <Text style={[styles.modeText, mode === item && styles.modeTextActive]}>
+                  {MODE_LABELS[item]}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
         </View>
         <View style={styles.headerActions}>
           <Pressable onPress={() => router.push('/notes')} hitSlop={10}>
@@ -284,6 +326,17 @@ const styles = StyleSheet.create({
   status: { marginTop: 3, fontSize: 13 },
   online: { color: '#547665' },
   offline: { color: '#9a685e' },
+  diagnostic: { color: '#87918b', fontSize: 11, marginTop: 2, maxWidth: 220 },
+  modeRow: { flexDirection: 'row', gap: 6, marginTop: 6 },
+  modeChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#ece7da',
+  },
+  modeChipActive: { backgroundColor: '#547665' },
+  modeText: { color: '#65736c', fontSize: 11, fontWeight: '600' },
+  modeTextActive: { color: '#fffdf8' },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   nav: { color: '#547665', fontSize: 14, fontWeight: '600' },
   unpair: { color: '#65736c', fontSize: 13 },
