@@ -34,22 +34,23 @@ export class ChatStore {
   private messages: ChatMessage[] = [];
   private readonly unsubscribe: () => void;
   private readonly unsubscribeStatus: () => void;
-  private historyLoaded = false;
-
   constructor(
     private readonly connection: ServerConnection,
     private readonly callbacks: ChatCallbacks,
   ) {
     this.unsubscribe = connection.subscribe((envelope) => this.handle(envelope));
     this.unsubscribeStatus = connection.onStatus((status) => {
-      if (status === 'connected' && !this.historyLoaded) this.loadHistory();
-      if (status === 'offline') this.callbacks.onSending(false);
+      if (status === 'connected') this.loadHistory();
+      if (status === 'offline') {
+        this.callbacks.onSending(false);
+        this.markStreamingInterrupted();
+      }
     });
   }
 
   loadHistory() {
-    if (!this.connection.send('chat.history', { session_id: 'default', limit: 100 })) return;
-    this.historyLoaded = true;
+    this.markStreamingInterrupted();
+    this.connection.send('chat.history', { session_id: 'default', limit: 100 });
   }
 
   sendMessage(content: string) {
@@ -62,12 +63,25 @@ export class ChatStore {
     ];
     this.callbacks.onMessages(this.messages);
     this.callbacks.onSending(true);
-    this.connection.send('chat.send', { session_id: 'default', content: text });
+    if (!this.connection.send('chat.send', { session_id: 'default', content: text })) {
+      this.callbacks.onSending(false);
+      throw new Error('消息未送达，连接正在恢复，请稍后重试');
+    }
   }
 
   dispose() {
     this.unsubscribe();
     this.unsubscribeStatus();
+  }
+
+  private markStreamingInterrupted() {
+    let changed = false;
+    this.messages = this.messages.map((message) => {
+      if (!message.streaming) return message;
+      changed = true;
+      return { ...message, streaming: false, content: `${message.content}\n\n（连接中断，已在重连后同步完整记录）` };
+    });
+    if (changed) this.callbacks.onMessages([...this.messages]);
   }
 
   private handle(envelope: Envelope) {
