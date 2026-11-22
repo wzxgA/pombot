@@ -110,6 +110,7 @@ pub async fn serve(config: AppConfig, paths: AppPaths) -> Result<()> {
         .route("/pairing", get(pairing_page))
         .route("/pairing/qr.svg", get(pairing_qr))
         .route("/pairing/status", get(pairing_status))
+        .route("/pairing/link", get(pairing_link))
         .route("/ws/pair", get(pair_upgrade))
         .route("/ws", get(device_upgrade))
         .with_state(state);
@@ -246,6 +247,31 @@ async fn pairing_status(
     Ok(Json(
         serde_json::to_value(state.pairing.view()).unwrap_or_else(|_| json!({})),
     ))
+}
+
+/// 返回二维码里承载的那串链接原文。
+///
+/// 扫码失败时最难判断的就是"二维码里到底有没有公网地址"——肉眼看不出，
+/// 解码又麻烦。这个端点把它明文吐出来，一眼就能确认。
+async fn pairing_link(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(address): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Result<String, StatusCode> {
+    require_local(address, &headers)?;
+    let view = state.pairing.view();
+    let mut url = Url::parse("pombot://pair").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("url", &state.local_url)
+            .append_pair("code", &view.code)
+            .append_pair("pubkey", &view.public_key);
+        if let Some(public) = &state.public_url {
+            pairs.append_pair("alt", public);
+        }
+    }
+    Ok(url.to_string())
 }
 
 async fn pairing_qr(
@@ -420,8 +446,17 @@ async fn pair_upgrade(
 
 async fn device_upgrade(
     State(state): State<AppState>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // 记录入口来源。手机在外面连不上时，这一行能区分两种完全不同的故障：
+    // 「请求根本没到」还是「到了但认证没通过」——不记的话只能靠猜。
+    let origin = headers
+        .get("cf-connecting-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-");
+    info!("设备通道升级请求，来源 {origin}");
     upgrade.on_upgrade(move |socket| handle_device(socket, state))
 }
 
@@ -548,8 +583,12 @@ async fn handle_device(mut socket: WebSocket, state: AppState) {
     )
     .await
     {
-        Ok(Ok(device)) => device,
+        Ok(Ok(device)) => {
+            info!("设备已认证：{}（{}）", device.name, device.id);
+            device
+        }
         Ok(Err(error)) => {
+            warn!("设备认证失败：{error:#}");
             let _ = send_envelope(
                 &mut socket,
                 error_envelope(format!("认证失败：{error:#}"), None),
