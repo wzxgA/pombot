@@ -3,6 +3,7 @@
 //
 // 不渲染 HTML、不执行任何脚本：产物内容一律当纯文本处理，避免注入。
 
+import Markdown from '@ronradtke/react-native-markdown-display';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
@@ -75,12 +76,16 @@ export default function ArtifactScreen() {
   const mime = item?.artifact?.mime ?? '';
   const blobId = item?.artifact?.blobId ?? '';
   const isImage = mime.startsWith('image/');
-  const isText = mime.startsWith('text/') || mime === 'application/json';
+  const isMarkdown =
+    mime === 'text/markdown' ||
+    item?.artifact?.name.toLowerCase().endsWith('.md') ||
+    item?.artifact?.name.toLowerCase().endsWith('.markdown');
+  const isText = (mime.startsWith('text/') || mime === 'application/json') && !isMarkdown;
   // 大文件不内联渲染：这类判断是纯派生值，不该用 state 存。
   const tooLarge = isText && (item?.artifact?.size ?? 0) > MAX_INLINE_BYTES;
 
   useEffect(() => {
-    if (!device || !blobId || !isText || tooLarge) return;
+    if (!device || !blobId || (!isText && !isMarkdown) || tooLarge) return;
     let active = true;
     fetch(artifactUrl(getServerConnection(device).baseUrl, device, blobId))
       .then((response) => (response.ok ? response.text() : Promise.reject(new Error('下载失败'))))
@@ -96,7 +101,7 @@ export default function ArtifactScreen() {
     return () => {
       active = false;
     };
-  }, [device, blobId, isText, tooLarge]);
+  }, [device, blobId, isText, isMarkdown, tooLarge]);
 
   const openExternally = () => {
     if (!device || !item?.artifact) return;
@@ -151,6 +156,12 @@ export default function ArtifactScreen() {
         />
       ) : null}
 
+      {isMarkdown && !tooLarge ? (
+        <ScrollView contentContainerStyle={styles.markdownBody}>
+          {text ? <Markdown style={markdownStyles}>{text}</Markdown> : <Text style={styles.mono}>{loading ? '正在读取…' : '（空文件）'}</Text>}
+        </ScrollView>
+      ) : null}
+
       {isText && !tooLarge ? (
         <ScrollView contentContainerStyle={styles.textBody}>
           <Text style={styles.mono}>{text || (loading ? '正在读取…' : '（空文件）')}</Text>
@@ -166,7 +177,7 @@ export default function ArtifactScreen() {
         </View>
       ) : null}
 
-      {!isImage && !isText ? (
+      {!isImage && !isText && !isMarkdown ? (
         <View style={styles.fallback}>
           <Text style={styles.hint}>这类文件不在应用内预览。</Text>
           <Pressable style={styles.button} onPress={openExternally}>
@@ -204,6 +215,7 @@ const styles = StyleSheet.create({
   spinner: { marginTop: 24 },
   image: { flex: 1, margin: 16, borderRadius: 14 },
   textBody: { padding: 20 },
+  markdownBody: { padding: 20, paddingBottom: 40 },
   mono: { color: '#3c4a43', fontSize: 13, lineHeight: 21, fontFamily: 'monospace' },
   fallback: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, padding: 32 },
   hint: { color: '#65736c', fontSize: 15 },
@@ -215,3 +227,20 @@ const styles = StyleSheet.create({
   },
   buttonText: { color: '#fffdf8', fontWeight: '700' },
 });
+
+const markdownStyles = {
+  body: { color: '#3c4a43', fontSize: 15, lineHeight: 24 },
+  heading1: { color: '#23362f', fontSize: 26, fontWeight: '800' as const, marginTop: 8, marginBottom: 12 },
+  heading2: { color: '#23362f', fontSize: 21, fontWeight: '800' as const, marginTop: 18, marginBottom: 8 },
+  heading3: { color: '#23362f', fontSize: 18, fontWeight: '700' as const, marginTop: 14, marginBottom: 6 },
+  paragraph: { marginTop: 0, marginBottom: 12 },
+  strong: { color: '#23362f', fontWeight: '800' as const },
+  em: { fontStyle: 'italic' as const },
+  link: { color: '#547665', textDecorationLine: 'underline' as const },
+  blockquote: { backgroundColor: '#e8eee8', borderLeftColor: '#547665', borderLeftWidth: 4, paddingHorizontal: 12, paddingVertical: 6 },
+  code_inline: { backgroundColor: '#ece8de', color: '#834d43', borderRadius: 4, paddingHorizontal: 4 },
+  code_block: { backgroundColor: '#23362f', color: '#fffdf8', borderRadius: 10, padding: 12, fontFamily: 'monospace' },
+  bullet_list: { marginBottom: 8 },
+  ordered_list: { marginBottom: 8 },
+  list_item: { marginBottom: 4 },
+};
