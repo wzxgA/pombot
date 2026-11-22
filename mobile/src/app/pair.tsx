@@ -21,6 +21,7 @@ export default function PairScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [session, setSession] = useState<PairSession | null>(null);
   const [selected, setSelected] = useState<FoundComputer | null>(null);
+  const [endpointMode, setEndpointMode] = useState<'lan' | 'public'>('lan');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -37,13 +38,13 @@ export default function PairScreen() {
 
   useEffect(() => () => sessionRef.current?.socket.close(), []);
 
-  const start = async (ticket: PairTicket) => {
+  const start = async (ticket: PairTicket, endpoint = ticket.serverUrl) => {
     if (starting.current) return;
     starting.current = true;
     setBusy(true);
     setError('');
     try {
-      const next = await beginPairing(ticket);
+      const next = await beginPairing(ticket, endpoint);
       sessionRef.current = next;
       setSession(next);
     } catch (reason) {
@@ -55,9 +56,13 @@ export default function PairScreen() {
   };
 
   const scan = ({ data }: { data: string }) => {
-    if (busy || session) return;
+    if (busy || session || selected) return;
     try {
-      void start(parsePairTicket(data));
+      const ticket = parsePairTicket(data);
+      setError('');
+      setCode(ticket.code);
+      setEndpointMode(ticket.alt ? 'public' : 'lan');
+      setSelected({ name: '扫码识别的电脑', ticket });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -104,10 +109,19 @@ export default function PairScreen() {
         <View style={styles.center}>
           <Pom size={110} />
           <Text style={styles.title}>连接 {selected.name}</Text>
-          <Text style={styles.description}>输入电脑配对页面上的 6 位数字</Text>
+          <Text style={styles.description}>选择连接方式，并输入电脑配对页面上的 6 位数字</Text>
+          <View style={styles.modeRow}>
+            <Pressable style={[styles.modeChip, endpointMode === 'lan' && styles.modeChipActive]} onPress={() => setEndpointMode('lan')}>
+              <Text style={[styles.modeText, endpointMode === 'lan' && styles.modeTextActive]}>内网</Text>
+            </Pressable>
+            {selected.ticket.alt ? <Pressable style={[styles.modeChip, endpointMode === 'public' && styles.modeChipActive]} onPress={() => setEndpointMode('public')}>
+              <Text style={[styles.modeText, endpointMode === 'public' && styles.modeTextActive]}>外网</Text>
+            </Pressable> : null}
+          </View>
+          {!selected.ticket.alt && <Text style={styles.hint}>此二维码没有包含公网地址，请在电脑端配置公网地址后重新扫码</Text>}
           <TextInput style={styles.code} value={code} onChangeText={setCode} keyboardType="number-pad" maxLength={6} placeholder="000000" autoFocus />
           {error ? <Text style={styles.error}>{error}</Text> : null}
-          <Pressable style={[styles.primary, (!/^\d{6}$/.test(code) || busy) && styles.disabled]} disabled={!/^\d{6}$/.test(code) || busy} onPress={() => start({ ...selected.ticket, code })}>
+          <Pressable style={[styles.primary, (!/^\d{6}$/.test(code) || busy) && styles.disabled]} disabled={!/^\d{6}$/.test(code) || busy} onPress={() => start({ ...selected.ticket, code }, endpointMode === 'public' ? selected.ticket.alt : selected.ticket.serverUrl)}>
             {busy ? <ActivityIndicator color="#fffdf8" /> : <Text style={styles.primaryText}>继续</Text>}
           </Pressable>
           <Pressable onPress={cancel}><Text style={styles.secondary}>返回扫码</Text></Pressable>
@@ -153,4 +167,10 @@ const styles = StyleSheet.create({
   computer: { backgroundColor: '#fffdf8', borderRadius: 14, padding: 16, flexDirection: 'row', justifyContent: 'space-between' },
   computerName: { color: '#23362f', fontWeight: '600' },
   computerAction: { color: '#547665' },
+  modeRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
+  modeChip: { minWidth: 92, borderRadius: 12, paddingVertical: 11, paddingHorizontal: 18, backgroundColor: '#dce4dc', alignItems: 'center' },
+  modeChipActive: { backgroundColor: '#547665' },
+  modeText: { color: '#547665', fontWeight: '700' },
+  modeTextActive: { color: '#fffdf8' },
+  hint: { color: '#934f43', lineHeight: 20, textAlign: 'center', marginBottom: 10 },
 });

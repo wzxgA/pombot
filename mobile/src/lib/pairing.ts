@@ -17,9 +17,9 @@ export interface PairSession {
   device: Omit<PairedDevice, 'deviceId' | 'token'> & { deviceId: string; token: string };
 }
 
-export async function beginPairing(ticket: PairTicket): Promise<PairSession> {
+export async function beginPairing(ticket: PairTicket, endpoint = ticket.serverUrl): Promise<PairSession> {
   const identity = await createIdentity(ticket);
-  const socket = new WebSocket(websocketUrl(ticket.serverUrl, '/ws/pair'));
+  const socket = new WebSocket(websocketUrl(endpoint, '/ws/pair'));
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       socket.close();
